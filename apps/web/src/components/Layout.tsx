@@ -19,6 +19,7 @@ const NAV = [
   { to: "/outbox", label: "Outbox", icon: "⎋" },
   { to: "/onboarding", label: "Onboarding", icon: "⚙" },
   { to: "/interview", label: "Interview", icon: "❝" },
+  { to: "/assistant", label: "Forge Voice", icon: "◍" },
 ] as const;
 
 /** Redirects to /login when there is no authenticated user. */
@@ -41,20 +42,36 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Live clock for the topbar, ticking every 30s. */
+function useClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(new Date()), 30000);
+    return () => window.clearInterval(t);
+  }, []);
+  return now;
+}
+
 export function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [business, setBusiness] = useState<Business | null>(null);
+  const [navOpen, setNavOpen] = useState(false);
+  const [apiOk, setApiOk] = useState(true);
+  const now = useClock();
 
   useEffect(() => {
     let cancelled = false;
     businessApi
       .getMe()
       .then((b) => {
-        if (!cancelled) setBusiness(b);
+        if (!cancelled) {
+          setBusiness(b);
+          setApiOk(true);
+        }
       })
       .catch(() => {
-        /* business name is decorative; a failure must not break layout */
+        if (!cancelled) setApiOk(false);
       });
     return () => {
       cancelled = true;
@@ -68,7 +85,15 @@ export function Layout() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      {navOpen && (
+        <button
+          type="button"
+          className="nav-scrim"
+          aria-label="Close navigation"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+      <aside className={`sidebar${navOpen ? " open" : ""}`}>
         <div className="brand">
           <div className="brand-mark">F</div>
           <div className="brand-name">ForgeOS</div>
@@ -79,6 +104,7 @@ export function Layout() {
               key={item.to}
               to={item.to}
               end={"end" in item && item.end}
+              onClick={() => setNavOpen(false)}
               className={({ isActive }) =>
                 `nav-link${isActive ? " nav-link-active" : ""}`
               }
@@ -99,14 +125,54 @@ export function Layout() {
 
       <div className="main-col">
         <header className="topbar">
-          <div className="topbar-business">
-            {business ? business.name : <span className="muted">…</span>}
-          </div>
-          <div className="topbar-user">
-            <span className="topbar-user-name">
-              {user?.full_name || user?.email}
+          <button
+            type="button"
+            className="nav-toggle"
+            aria-label="Open navigation"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen((v) => !v)}
+          >
+            <span aria-hidden="true">☰</span>
+          </button>
+          <div className="topbar-brand">
+            <span className="hex-mark" aria-hidden="true">F</span>
+            <span className="topbar-title">
+              FORGE<span className="os-word">Marketing OS</span>
             </span>
-            {user && <span className="badge badge-gray">{user.role}</span>}
+          </div>
+          <div className="status-pills" aria-label="System status">
+            <span className={`pill${apiOk ? "" : " down"}`}>
+              <span className="dot" />
+              API
+            </span>
+            <span className="pill">
+              <span className="dot" />
+              Worker
+            </span>
+            <span className="pill">
+              <span className="dot" />
+              Sync
+            </span>
+          </div>
+          <div className="topbar-right">
+            <span className="topbar-clock">
+              {now.toLocaleDateString("en-US", {
+                weekday: "short",
+                month: "short",
+                day: "numeric",
+              })}{" "}
+              {now.toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: false,
+              })}
+            </span>
+            <div className="topbar-user">
+              <span className="topbar-user-name">
+                {business ? business.name : user?.full_name || user?.email}
+              </span>
+              {user && <span className="badge badge-gray">{user.role}</span>}
+            </div>
           </div>
         </header>
         <main className="page">

@@ -316,6 +316,12 @@ export interface AutopilotSettings {
   daily_send_cap: number;
   quiet_hours_start: number;
   quiet_hours_end: number;
+  /** Planner schedule (per business): 0=Monday..6=Sunday, local hour 0-23. */
+  plan_day: number;
+  plan_hour: number;
+  plan_cadence: "weekly" | "biweekly";
+  /** Most recent draft (cron or run-now); drives the biweekly gate. */
+  last_planned_at: string | null;
 }
 
 export interface DayStat {
@@ -636,6 +642,12 @@ export const autopilotApi = {
       body: { plan_id: planId },
     });
   },
+  /** Draft this week's plan immediately (owner/admin). Idempotent per week. */
+  runNow(): Promise<PlanRunNowOut> {
+    return apiFetch<PlanRunNowOut>("/autopilot/plan/run-now", {
+      method: "POST",
+    });
+  },
 };
 
 /* ------------------------------------------------------------------ */
@@ -669,6 +681,11 @@ export interface ContentPlan {
 export interface PlanApproveOut {
   plan: ContentPlan;
   campaign_id: string;
+}
+
+export interface PlanRunNowOut {
+  plan: ContentPlan;
+  created: boolean;
 }
 
 export const analyticsApi = {

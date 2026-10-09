@@ -43,6 +43,18 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
   const wantListen = useRef(false);
   const optsRef = useRef({ onResult, conversationMode, speakReplies, rate });
   optsRef.current = { onResult, conversationMode, speakReplies, rate };
+  /** Live mic capture stream, kept alive while listening so the orb can
+   *  analyze real input audio. Null when not listening. */
+  const [micStream, setMicStream] = useState<MediaStream | null>(null);
+  const micStreamRef = useRef<MediaStream | null>(null);
+
+  const releaseMicStream = useCallback(() => {
+    micStreamRef.current?.getTracks().forEach((t) => {
+      try { t.stop(); } catch { /* noop */ }
+    });
+    micStreamRef.current = null;
+    setMicStream(null);
+  }, []);
 
   const stopSpeaking = useCallback(() => {
     if (ttsSupported()) {
@@ -60,10 +72,14 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
     // Android Chrome will silently fail to start SpeechRecognition unless the
     // page already holds microphone permission. Prime it explicitly first so
     // the user gets the system permission prompt instead of silence.
+    // The stream is kept alive while listening so the orb can analyze the
+    // real input signal; it is released when listening stops.
     try {
       if (navigator.mediaDevices?.getUserMedia) {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((t) => t.stop());
+        releaseMicStream();
+        micStreamRef.current = stream;
+        setMicStream(stream);
       }
     } catch {
       setError(
@@ -117,6 +133,8 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
       // and we're not about to speak a reply (speak() re-arms on end).
       if (wantListen.current && optsRef.current.conversationMode && !optsRef.current.speakReplies) {
         startListening();
+      } else {
+        releaseMicStream();
       }
     };
     try {
@@ -128,7 +146,7 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
     } catch {
       setError("Could not start the microphone — try again.");
     }
-  }, []);
+  }, [releaseMicStream]);
 
   const stopListening = useCallback(() => {
     wantListen.current = false;
@@ -137,9 +155,10 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
     } catch {
       /* noop */
     }
+    releaseMicStream();
     setListening(false);
     setInterim("");
-  }, []);
+  }, [releaseMicStream]);
 
   /** Speak text aloud; re-arms the mic when done in conversation mode. */
   const speak = useCallback(
@@ -153,6 +172,8 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
       } catch {
         /* noop */
       }
+      // Mic goes quiet while Draven speaks — re-armed on utterance end.
+      releaseMicStream();
       setListening(false);
       setInterim("");
       const u = new SpeechSynthesisUtterance(text);
@@ -180,7 +201,7 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
       window.speechSynthesis.cancel();
       window.speechSynthesis.speak(u);
     },
-    [startListening, stopListening]
+    [startListening, stopListening, releaseMicStream]
   );
 
   // Load voices (some platforms populate async).
@@ -202,14 +223,16 @@ export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02
         /* noop */
       }
       if (ttsSupported()) window.speechSynthesis.cancel();
+      releaseMicStream();
     };
-  }, []);
+  }, [releaseMicStream]);
 
   return {
     listening,
     speaking,
     interim,
     error,
+    micStream,
     startListening,
     stopListening,
     speak,

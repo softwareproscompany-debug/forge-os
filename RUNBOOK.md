@@ -128,6 +128,38 @@ kubectl -n forgeos scale deploy/worker --replicas=6
 Watch `daily_send_cap` and provider rate limits first — adding workers past the
 provider's quota just produces faster 429s (see KEYS.md per-provider notes).
 
+## Autopilot planner (Card 4)
+
+**Diagnosis, 2026-10-09** — the planner "wasn't working right" for two
+code-level reasons (the job and its tests were sound):
+
+1. **Approved plans never ran.** `POST /autopilot/plan/approve` created the
+   campaign as `scheduled`, but `campaign_tick` only processes `running`
+   campaigns and nothing ever promoted `scheduled → running`. Approving a
+   plan silently did nothing until someone manually launched the campaign.
+   Fix: approval now creates the campaign **running** — the human approval
+   is the launch gate, so the week runs itself.
+2. **Sends drifted off the planned days.** Steps stored `delay_hours=day*24`
+   against a Monday 09:00 `starts_at`, but the tick sends the first due
+   step immediately and spaces later steps from the *actual* send time — so
+   a Tue/Thu/Sat plan actually sent Mon/Thu/Mon. Fix: `starts_at` anchors
+   to the first item's day at 09:00 business-local and steps carry true
+   inter-step gaps (`(day[i]-day[i-1])*24`).
+
+**Scheduling is now per business** (`autopilot_settings`: `plan_day` 0–6,
+`plan_hour` 0–23, `plan_cadence` weekly|biweekly; defaults Monday 06:00
+weekly). The engine ticks every 15 minutes but each business drafts only
+inside its own configured window; `biweekly` drafts at most once per ~13
+days (tracked on `last_planned_at`). Edit it on the Autopilot page
+("Planner schedule") or `PUT /api/v1/autopilot`.
+
+**Manual trigger:** `POST /api/v1/autopilot/plan/run-now` (owner/admin)
+drafts this week's plan immediately via the worker's `autopilot_plan_now`
+job — ignores the schedule, stays idempotent per week
+(`created=false` + the existing plan). 503 = worker queue unreachable
+(Redis down / worker not running — this is also the first thing to check
+when *no* plan ever appears: the cron only runs where the worker runs).
+
 ## Seeding / resetting demo data
 
 ```bash

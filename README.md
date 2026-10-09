@@ -207,7 +207,7 @@ end to end on stubs, and show me the autopilot drafting next week's
 plan from the evidence it collected.
 ```
 
-*In this repo: `apps/worker/worker/jobs.py` (`campaign_tick`, triggers, `autopilot_plan` — drafts the weekly content plan Monday 06:00 business-local), `apps/api/app/routers/campaigns.py` + `apps/api/app/routers/autopilot.py` (`GET /autopilot/plan`, `POST /autopilot/plan/approve` → materializes a scheduled campaign), content calendar + plan review in the web UI (`/calendar`, `/campaigns`, `/autopilot`).*
+*In this repo: `apps/worker/worker/jobs.py` (`campaign_tick`, triggers, `autopilot_plan` — drafts each business's content plan on its own configured schedule: `plan_day`/`plan_hour`/`plan_cadence`, default Monday 06:00 business-local weekly), `apps/api/app/routers/campaigns.py` + `apps/api/app/routers/autopilot.py` (`GET /autopilot/plan`, `POST /autopilot/plan/approve` → materializes a running campaign, `POST /autopilot/plan/run-now` → manual draft), content calendar + plan review in the web UI (`/calendar`, `/campaigns`, `/autopilot`).*
 
 ## Card 5: Evidence
 

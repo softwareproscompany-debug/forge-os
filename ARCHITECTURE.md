@@ -46,7 +46,8 @@ Multi-tenancy: every table except `businesses`/`users`/global carries
   conversion timestamps, `provider_message_id`, `meta` jsonb) → `events`
   (`contact_added | email_opened | email_clicked | sms_replied | converted`).
 - **Control plane**: `autopilot_settings` (per business: `auto_approve`,
-  `require_approval_for_channels`, `daily_send_cap`, quiet hours),
+  `require_approval_for_channels`, `daily_send_cap`, quiet hours,
+  planner schedule `plan_day`/`plan_hour`/`plan_cadence` + `last_planned_at`),
   `generation_logs` (provider/model/tokens/cost/latency per generation),
   `dev_outbox` (stub provider writes — the "sent mail" of zero-key mode).
 

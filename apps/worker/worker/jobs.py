@@ -1,6 +1,6 @@
 """ForgeOS worker jobs (arq).
 
-Six jobs, per CONTRACTS.md:
+Seven jobs, per CONTRACTS.md:
 
 * :func:`generate_asset` — render a prompt from the asset kind + brand kit,
   call ``forge_llm.get_provider().generate()``, run guardrails, save the
@@ -14,10 +14,14 @@ Six jobs, per CONTRACTS.md:
   quiet hours and the per-business daily send cap.
 * :func:`handle_event` — ``contact_added`` enrollment plus
   opened/clicked/converted stamping via ``provider_message_id``.
-* :func:`autopilot_plan` — hourly cron: at each business's local Monday
-  06:00, draft the week's content plan (``content_plans``) from the latest
-  brand kit + latest weekly evidence summary + latest approved assets.
-  Human approval happens in the API/UI; this job only ever writes drafts.
+* :func:`autopilot_plan` — hourly cron: at each business's configured plan
+  moment (default local Monday 06:00, weekly), draft the week's content plan
+  (``content_plans``) from the latest brand kit + latest weekly evidence
+  summary + latest approved assets. Human approval happens in the API/UI;
+  this job only ever writes drafts.
+* :func:`autopilot_plan_now` — manual trigger (``POST
+  /api/v1/autopilot/plan/run-now``): draft one business's plan immediately,
+  ignoring the schedule but staying idempotent per week.
 
 Conventions:
 
@@ -115,6 +119,7 @@ __all__ = [
     "campaign_tick",
     "handle_event",
     "autopilot_plan",
+    "autopilot_plan_now",
     "weekly_summary",
 ]
 
@@ -1067,10 +1072,21 @@ async def handle_event(ctx: dict, event_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-#: Local weekday (Monday) and hour at which a business's weekly content plan
-#: is drafted.
-_PLAN_WEEKDAY = 0  # Monday
-_PLAN_HOUR = 6
+#: Default local weekday/hour at which a business's weekly content plan is
+#: drafted when it has no ``autopilot_settings`` row (or the row predates
+#: the scheduling columns): Monday 06:00. Businesses customize these via
+#: ``PUT /api/v1/autopilot`` (``plan_day``, ``plan_hour``, ``plan_cadence``).
+_DEFAULT_PLAN_DAY = 0  # Monday
+_DEFAULT_PLAN_HOUR = 6
+
+#: Supported planner cadences (``autopilot_settings.plan_cadence``).
+_PLAN_CADENCE_WEEKLY = "weekly"
+_PLAN_CADENCE_BIWEEKLY = "biweekly"
+
+#: Minimum gap between drafts on the biweekly cadence. 13 days (not 14)
+#: so the hourly cron's own timing can't starve a business that drafted
+#: a few hours late last cycle.
+_BIWEEKLY_MIN_GAP = timedelta(days=13)
 
 #: How many of the latest approved assets the planner may look at.
 _PLAN_ASSET_LOOKBACK = 10
@@ -1090,16 +1106,73 @@ def _business_tz(tz_name: str | None) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def _is_plan_moment(local_now: datetime) -> bool:
-    """True only during local Monday 06:xx — the weekly draft window.
+def _is_plan_moment(local_now: datetime, plan_day: int, plan_hour: int) -> bool:
+    """True only during the business's configured draft window.
 
-    The job is an hourly cron (see :mod:`worker.settings`): each business
-    lives in its own timezone, so the job must wake every hour to ask
-    "is it 06:00 on Monday for *this* business yet?". A single daily cron
-    at a fixed UTC hour would miss businesses whose Monday 06:00 falls in
-    other UTC hours.
+    The job wakes every 15 minutes (see :mod:`worker.settings`): each
+    business lives in its own timezone *and* has its own schedule, so the
+    job must wake frequently to ask "is it the plan hour on the plan day
+    for *this* business yet?". A single daily cron at a fixed UTC hour
+    would miss businesses whose plan moment falls in other UTC hours.
     """
-    return local_now.weekday() == _PLAN_WEEKDAY and local_now.hour == _PLAN_HOUR
+    return local_now.weekday() == plan_day and local_now.hour == plan_hour
+
+
+def _plan_schedule(
+    db: Session, business_id: uuid.UUID
+) -> tuple[int, int, str, AutopilotSettings | None]:
+    """A business's planner schedule: ``(plan_day, plan_hour, plan_cadence,
+    settings_row)``.
+
+    Businesses without an ``autopilot_settings`` row (or with a legacy row)
+    get the defaults — Monday 06:00, weekly. Missing/legacy rows are *not*
+    created here: the cron path stays read-only for scheduling config;
+    the API's get-or-create writes the row on first settings access.
+    """
+    settings = db.get(AutopilotSettings, business_id)
+    if settings is None:
+        return _DEFAULT_PLAN_DAY, _DEFAULT_PLAN_HOUR, _PLAN_CADENCE_WEEKLY, None
+    day = settings.plan_day if settings.plan_day is not None else _DEFAULT_PLAN_DAY
+    hour = settings.plan_hour if settings.plan_hour is not None else _DEFAULT_PLAN_HOUR
+    cadence = settings.plan_cadence or _PLAN_CADENCE_WEEKLY
+    return day, hour, cadence, settings
+
+
+def _week_monday(day: date) -> date:
+    """Monday (date) of the week containing ``day`` — the ``week_start``
+    convention for content plans, whatever weekday the plan is drafted."""
+    return day - timedelta(days=day.weekday())
+
+
+def _plan_exists_for_week(
+    db: Session, business_id: uuid.UUID, week_start: date
+) -> uuid.UUID | None:
+    """Id of the draft/approved plan for (business, week), or None."""
+    row = (
+        db.query(ContentPlan.id)
+        .filter(
+            ContentPlan.business_id == business_id,
+            ContentPlan.week_start == week_start,
+            ContentPlan.status.in_([PlanStatus.draft, PlanStatus.approved]),
+        )
+        .first()
+    )
+    return row[0] if row else None
+
+
+def _biweekly_due(now: datetime, settings: AutopilotSettings | None) -> bool:
+    """True when the biweekly cadence allows another draft right now.
+
+    Weekly cadence (or a missing settings row) is always due. Biweekly
+    drafts at most once per ~13 days, measured from the last draft
+    (cron or manual run-now) stamped on ``settings.last_planned_at``.
+    """
+    if settings is None or settings.plan_cadence != _PLAN_CADENCE_BIWEEKLY:
+        return True
+    last = ensure_aware(settings.last_planned_at)
+    if last is None:
+        return True
+    return (now - last) >= _BIWEEKLY_MIN_GAP
 
 
 def _latest_brand_kit(db: Session, business_id: uuid.UUID) -> BrandKit | None:
@@ -1352,24 +1425,75 @@ async def _llm_plan_items(
     return items
 
 
+async def _draft_weekly_plan(
+    db: Session,
+    business: Business,
+    week_start: date,
+    created_by: uuid.UUID | None = None,
+) -> ContentPlan:
+    """Build and persist one draft ``content_plans`` row for a business.
+
+    Shared by the hourly cron (:func:`autopilot_plan`) and the manual
+    trigger (:func:`autopilot_plan_now`). Gathers the latest brand kit,
+    latest weekly summary, and latest approved assets, builds the 3-item
+    draft (Tue email / Thu social / Sat SMS — live LLM when configured,
+    deterministic stub otherwise), and flushes the row. The caller owns
+    the commit; ``created_by`` records who triggered the draft (None for
+    the cron).
+    """
+    brand_kit = _latest_brand_kit(db, business.id)
+    weekly_summary = _latest_summary(db, business.id)
+    approved_assets = _latest_approved_assets(db, business.id)
+    email_asset = _pick_email_asset(db, business.id, weekly_summary, approved_assets)
+    items = await _llm_plan_items(week_start, brand_kit, weekly_summary, approved_assets)
+    if items is None:
+        items = _stub_plan_items(week_start, brand_kit, weekly_summary, email_asset)
+    plan = ContentPlan(
+        business_id=business.id,
+        week_start=week_start,
+        status=PlanStatus.draft,
+        items=items,
+        created_by=created_by,
+    )
+    db.add(plan)
+    db.flush()  # assign plan.id for the caller
+    return plan
+
+
+def _stamp_last_planned(
+    db: Session, business_id: uuid.UUID, now: datetime
+) -> None:
+    """Record a draft on the business's settings row (biweekly gating).
+
+    Only stamps when the row exists — the cron path never creates
+    settings rows as a side effect (see :func:`_plan_schedule`).
+    """
+    settings = db.get(AutopilotSettings, business_id)
+    if settings is not None:
+        settings.last_planned_at = now
+
+
 async def autopilot_plan(ctx: dict) -> dict[str, Any]:
-    """Hourly cron: draft each business's weekly content plan at its local
-    Monday 06:00.
+    """15-minute engine tick: draft each business's content plan on its own
+    schedule.
 
     For every business: convert ``now`` to the business timezone (stdlib
-    ``zoneinfo``, UTC fallback); skip unless it is Monday 06:xx local;
-    skip when a ``draft`` or ``approved`` plan already exists for that
-    (business, week_start); otherwise gather the latest brand kit, latest
-    weekly summary, and latest approved assets, build the 3-item draft
-    (Tue email / Thu social / Sat SMS), and store it as ``status=draft``.
-    Commits per business so one bad row cannot poison the whole run.
+    ``zoneinfo``, UTC fallback); skip unless local time matches the
+    business's configured ``plan_day``/``plan_hour`` (default Monday
+    06:00); skip when a ``draft`` or ``approved`` plan already exists for
+    that (business, week_start — the Monday of the current week); skip on
+    the biweekly cadence when the previous draft is less than ~13 days
+    old. Otherwise draft via :func:`_draft_weekly_plan`, stamp
+    ``last_planned_at``, and commit. Commits per business so one bad row
+    cannot poison the whole run.
     """
     now = utcnow()
     summary: dict[str, int] = {
         "businesses": 0,
         "drafted": 0,
-        "skipped_not_monday": 0,
+        "skipped_not_due": 0,
         "skipped_exists": 0,
+        "skipped_cadence": 0,
         "errors": 0,
     }
     try:
@@ -1382,52 +1506,28 @@ async def autopilot_plan(ctx: dict) -> dict[str, Any]:
         businesses = db.query(Business).all()
         for business in businesses:
             summary["businesses"] += 1
+            plan_day, plan_hour, _cadence, settings = _plan_schedule(db, business.id)
             local_now = now.astimezone(_business_tz(business.timezone))
-            if not _is_plan_moment(local_now):
-                summary["skipped_not_monday"] += 1
+            if not _is_plan_moment(local_now, plan_day, plan_hour):
+                summary["skipped_not_due"] += 1
                 continue
-            week_start = local_now.date()
-            exists = (
-                db.query(ContentPlan.id)
-                .filter(
-                    ContentPlan.business_id == business.id,
-                    ContentPlan.week_start == week_start,
-                    ContentPlan.status.in_([PlanStatus.draft, PlanStatus.approved]),
-                )
-                .first()
-            )
-            if exists is not None:
+            week_start = _week_monday(local_now.date())
+            if _plan_exists_for_week(db, business.id, week_start) is not None:
                 summary["skipped_exists"] += 1
                 continue
+            if not _biweekly_due(now, settings):
+                summary["skipped_cadence"] += 1
+                continue
             try:
-                brand_kit = _latest_brand_kit(db, business.id)
-                weekly_summary = _latest_summary(db, business.id)
-                approved_assets = _latest_approved_assets(db, business.id)
-                email_asset = _pick_email_asset(
-                    db, business.id, weekly_summary, approved_assets
-                )
-                items = await _llm_plan_items(
-                    week_start, brand_kit, weekly_summary, approved_assets
-                )
-                if items is None:
-                    items = _stub_plan_items(
-                        week_start, brand_kit, weekly_summary, email_asset
-                    )
-                db.add(
-                    ContentPlan(
-                        business_id=business.id,
-                        week_start=week_start,
-                        status=PlanStatus.draft,
-                        items=items,
-                    )
-                )
+                plan = await _draft_weekly_plan(db, business, week_start)
+                _stamp_last_planned(db, business.id, now)
                 db.commit()
                 summary["drafted"] += 1
                 log.info(
                     "autopilot_plan: drafted plan for business %s week %s (%d items)",
                     business.id,
                     week_start,
-                    len(items),
+                    len(plan.items or []),
                 )
             except Exception:
                 db.rollback()
@@ -1441,6 +1541,55 @@ async def autopilot_plan(ctx: dict) -> dict[str, Any]:
         return {"ok": True, **summary}
     finally:
         db.close()
+
+
+async def autopilot_plan_now(
+    ctx: dict, business_id: str, created_by: str | None = None
+) -> dict[str, Any]:
+    """Manual trigger: draft a business's content plan immediately.
+
+    Enqueued by ``POST /api/v1/autopilot/plan/run-now`` (owner/admin only).
+    Unlike the scheduled engine tick, this ignores the business's configured
+    ``plan_day``/``plan_hour`` — but it still respects idempotency: when a
+    ``draft``/``approved`` plan already exists for the current week, the
+    existing plan is returned (``created=False``) instead of drafting a
+    duplicate. A successful draft stamps ``last_planned_at`` so the
+    biweekly cadence does not draft again on top of it.
+    """
+    log.info("autopilot_plan_now start business_id=%s", business_id)
+    bid = _as_uuid(business_id, "business")
+    creator: uuid.UUID | None = None
+    if created_by is not None:
+        creator = _as_uuid(created_by, "created_by")
+    now = utcnow()
+    with _job_session("autopilot_plan_now") as db:
+        business = db.get(Business, bid)
+        if business is None:
+            log.error("autopilot_plan_now: business %s not found", business_id)
+            return {"ok": False, "error": f"business {business_id} not found"}
+        local_now = now.astimezone(_business_tz(business.timezone))
+        week_start = _week_monday(local_now.date())
+        existing_id = _plan_exists_for_week(db, bid, week_start)
+        if existing_id is not None:
+            log.info(
+                "autopilot_plan_now: plan %s already exists for business %s "
+                "week %s; not drafting a duplicate",
+                existing_id,
+                bid,
+                week_start,
+            )
+            return {"ok": True, "created": False, "plan_id": str(existing_id)}
+        plan = await _draft_weekly_plan(db, business, week_start, created_by=creator)
+        _stamp_last_planned(db, bid, now)
+        log.info(
+            "autopilot_plan_now: drafted plan %s for business %s week %s "
+            "(%d items, manual trigger)",
+            plan.id,
+            bid,
+            week_start,
+            len(plan.items or []),
+        )
+        return {"ok": True, "created": True, "plan_id": str(plan.id)}
 
 
 # ---------------------------------------------------------------------------

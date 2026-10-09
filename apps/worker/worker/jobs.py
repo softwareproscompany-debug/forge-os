@@ -1080,6 +1080,7 @@ _DEFAULT_PLAN_DAY = 0  # Monday
 _DEFAULT_PLAN_HOUR = 6
 
 #: Supported planner cadences (``autopilot_settings.plan_cadence``).
+_PLAN_CADENCE_DAILY = "daily"
 _PLAN_CADENCE_WEEKLY = "weekly"
 _PLAN_CADENCE_BIWEEKLY = "biweekly"
 
@@ -1106,7 +1107,9 @@ def _business_tz(tz_name: str | None) -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
-def _is_plan_moment(local_now: datetime, plan_day: int, plan_hour: int) -> bool:
+def _is_plan_moment(
+    local_now: datetime, plan_day: int, plan_hour: int, cadence: str
+) -> bool:
     """True only during the business's configured draft window.
 
     The job wakes every 15 minutes (see :mod:`worker.settings`): each
@@ -1114,7 +1117,12 @@ def _is_plan_moment(local_now: datetime, plan_day: int, plan_hour: int) -> bool:
     job must wake frequently to ask "is it the plan hour on the plan day
     for *this* business yet?". A single daily cron at a fixed UTC hour
     would miss businesses whose plan moment falls in other UTC hours.
+
+    Daily cadence ignores ``plan_day`` — every day at ``plan_hour`` is a
+    plan moment.
     """
+    if cadence == _PLAN_CADENCE_DAILY:
+        return local_now.hour == plan_hour
     return local_now.weekday() == plan_day and local_now.hour == plan_hour
 
 
@@ -1153,6 +1161,38 @@ def _plan_exists_for_week(
         .filter(
             ContentPlan.business_id == business_id,
             ContentPlan.week_start == week_start,
+            ContentPlan.status.in_([PlanStatus.draft, PlanStatus.approved]),
+        )
+        .first()
+    )
+    return row[0] if row else None
+
+
+def _plan_exists_for_date(
+    db: Session,
+    business_id: uuid.UUID,
+    local_now: datetime,
+    tz: ZoneInfo,
+) -> uuid.UUID | None:
+    """Id of the draft/approved plan created on the business-local date, or None.
+
+    Used by the daily cadence: one fresh draft per day at the plan hour.
+    Bounds are computed in the business's timezone so a plan drafted at
+    10pm local isn't mistaken for "tomorrow" in UTC. The plan still
+    targets the current week via ``week_start``.
+    """
+    local_day = local_now.date()
+    day_start_local = datetime(
+        local_day.year, local_day.month, local_day.day, tzinfo=tz
+    )
+    day_start_utc = day_start_local.astimezone(timezone.utc)
+    day_end_utc = day_start_utc + timedelta(days=1)
+    row = (
+        db.query(ContentPlan.id)
+        .filter(
+            ContentPlan.business_id == business_id,
+            ContentPlan.created_at >= day_start_utc,
+            ContentPlan.created_at < day_end_utc,
             ContentPlan.status.in_([PlanStatus.draft, PlanStatus.approved]),
         )
         .first()
@@ -1506,13 +1546,22 @@ async def autopilot_plan(ctx: dict) -> dict[str, Any]:
         businesses = db.query(Business).all()
         for business in businesses:
             summary["businesses"] += 1
-            plan_day, plan_hour, _cadence, settings = _plan_schedule(db, business.id)
-            local_now = now.astimezone(_business_tz(business.timezone))
-            if not _is_plan_moment(local_now, plan_day, plan_hour):
+            plan_day, plan_hour, cadence, settings = _plan_schedule(db, business.id)
+            tz = _business_tz(business.timezone)
+            local_now = now.astimezone(tz)
+            if not _is_plan_moment(local_now, plan_day, plan_hour, cadence):
                 summary["skipped_not_due"] += 1
                 continue
             week_start = _week_monday(local_now.date())
-            if _plan_exists_for_week(db, business.id, week_start) is not None:
+            if cadence == _PLAN_CADENCE_DAILY:
+                # Daily: one fresh draft per business-local day (not per week).
+                if (
+                    _plan_exists_for_date(db, business.id, local_now, tz)
+                    is not None
+                ):
+                    summary["skipped_exists"] += 1
+                    continue
+            elif _plan_exists_for_week(db, business.id, week_start) is not None:
                 summary["skipped_exists"] += 1
                 continue
             if not _biweekly_due(now, settings):

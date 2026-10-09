@@ -11,7 +11,7 @@ datetimes; Postgres returns them aware).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
@@ -44,6 +44,7 @@ def ensure_aware(value: datetime | None, assume: str = "UTC") -> datetime | None
         return None
     if value.tzinfo is not None:
         return value
+    tz: tzinfo
     try:
         tz = ZoneInfo(assume)
     except ZoneInfoNotFoundError:
@@ -67,6 +68,7 @@ def to_campaign_tz(now: datetime, tz_name: str | None) -> datetime:
     """Convert ``now`` to the campaign's timezone (falls back to UTC)."""
     aware = ensure_aware(now)
     assert aware is not None
+    tz: tzinfo
     try:
         tz = ZoneInfo(tz_name or "UTC")
     except ZoneInfoNotFoundError:

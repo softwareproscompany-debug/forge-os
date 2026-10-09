@@ -1,0 +1,22 @@
+# ForgeOS worker — pinned runtime + test dependencies.
+#
+# Local workspace packages (editable installs for local dev):
+#   pip install -r requirements.txt        # from apps/worker/
+# The -e lines below resolve relative to this file, i.e. to
+# ../../packages/forge-{db,llm,channels}.
+#
+# In Docker the packages are COPYed to /srv/packages and this same file
+# installs them (see Dockerfile).
+
+-e ../../packages/forge-db
+-e ../../packages/forge-llm
+-e ../../packages/forge-channels
+
+arq==0.28.0
+redis==5.3.1
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
+Jinja2==3.1.6
+httpx==0.28.1
+pytest==8.4.2
+pytest-asyncio==1.4.0

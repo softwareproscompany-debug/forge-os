@@ -36,14 +36,14 @@ import os
 import uuid
 from collections import deque
 from collections.abc import Iterator
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
 import httpx
 import jinja2
 from arq import Retry
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,7 @@ from forge_db.models import (
     Campaign,
     CampaignEnrollment,
     CampaignStep,
+    CampaignStatus,
     Channel,
     Contact,
     EnrollmentStatus,
@@ -180,6 +181,13 @@ def _job_session(job_name: str) -> Iterator[Session]:
         raise
     finally:
         db.close()
+
+
+def _aware(value: datetime) -> datetime:
+    """``ensure_aware`` for values the caller knows are not None."""
+    out = ensure_aware(value)
+    assert out is not None
+    return out
 
 
 def _as_uuid(raw: str, what: str) -> uuid.UUID:
@@ -723,7 +731,7 @@ def _create_send(
 async def _tick_campaign(
     db: Session,
     campaign: Campaign,
-    now: Any,
+    now: datetime,
     redis: Any,
     summary: dict[str, int],
 ) -> None:
@@ -742,8 +750,11 @@ async def _tick_campaign(
     # (a) Bulk enrollment: no trigger on step 0 and the start time passed.
     first_step = steps[0]
     starts_at = ensure_aware(campaign.starts_at)
-    if not first_step.trigger_event and starts_at is not None and starts_at <= ensure_aware(now):
+    if not first_step.trigger_event and starts_at is not None and starts_at <= _aware(now):
         summary["enrolled"] += _bulk_enroll(db, campaign, now)
+        # Sessions are created with autoflush=False: make the new enrollments
+        # visible to the due-query below in this same tick.
+        db.flush()
 
     # (b) Advance due enrollments.
     due = (
@@ -794,7 +805,11 @@ async def _tick_campaign(
             enrollment.status = EnrollmentStatus.completed
             enrollment.next_run_at = None
         else:
-            enrollment.next_run_at = add_delay_hours(ensure_aware(now), step.delay_hours)
+            # The delay belongs to the *next* step (drip spacing).
+            next_step = steps[enrollment.current_step]
+            enrollment.next_run_at = add_delay_hours(
+                _aware(now), next_step.delay_hours
+            )
         summary["sent"] += 1
 
         if redis is not None:

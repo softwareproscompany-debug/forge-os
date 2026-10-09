@@ -157,6 +157,91 @@ class ContactOut(ContactBase, ORMModel):
     created_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# OS screens: Pipeline / Meetings / Knowledge
+# ---------------------------------------------------------------------------
+
+OPPORTUNITY_STAGES = ("new", "qualified", "proposal", "negotiation", "closed", "lost")
+
+
+class OpportunityBase(BaseModel):
+    title: str = Field(max_length=255)
+    contact_id: uuid.UUID | None = None
+    value_cents: int = Field(default=0, ge=0)
+    stage: Literal["new", "qualified", "proposal", "negotiation", "closed", "lost"] = "new"
+    probability: int = Field(default=50, ge=0, le=100)
+    expected_close_date: datetime | None = None
+    notes: str | None = None
+
+
+class OpportunityCreate(OpportunityBase):
+    pass
+
+
+class OpportunityUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    contact_id: uuid.UUID | None = None
+    value_cents: int | None = Field(default=None, ge=0)
+    stage: Literal["new", "qualified", "proposal", "negotiation", "closed", "lost"] | None = None
+    probability: int | None = Field(default=None, ge=0, le=100)
+    expected_close_date: datetime | None = None
+    notes: str | None = None
+
+
+class OpportunityOut(OpportunityBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class MeetingBase(BaseModel):
+    title: str = Field(max_length=255)
+    starts_at: datetime
+    ends_at: datetime | None = None
+    attendees: list[str] = Field(default_factory=list)
+    notes: str | None = None
+
+
+class MeetingCreate(MeetingBase):
+    pass
+
+
+class MeetingUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
+    attendees: list[str] | None = None
+    notes: str | None = None
+
+
+class MeetingOut(MeetingBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class KnowledgeDocBase(BaseModel):
+    title: str = Field(max_length=255)
+    content: str = ""
+    source: str | None = Field(default=None, max_length=255)
+
+
+class KnowledgeDocCreate(KnowledgeDocBase):
+    pass
+
+
+class KnowledgeDocUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    content: str | None = None
+    source: str | None = Field(default=None, max_length=255)
+
+
+class KnowledgeDocOut(KnowledgeDocBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
 class ConsentRequest(BaseModel):
     channel: Literal["email", "sms"]
     granted: bool
@@ -765,3 +850,122 @@ class AffiliateConversionResponse(BaseModel):
     link_id: uuid.UUID
     program_id: uuid.UUID
     commission_usd: float
+
+
+# ---------------------------------------------------------------------------
+# Growth Engine P1: partners, tiers, applications, portal, Stripe ingest
+# ---------------------------------------------------------------------------
+
+PARTNER_TYPES = ("customer_referrer", "affiliate", "agency", "strategic")
+PARTNER_STATUSES = ("pending", "approved", "rejected", "suspended")
+APPLICATION_STATUSES = ("pending", "approved", "rejected")
+
+
+class PartnerTierBase(BaseModel):
+    name: str = Field(max_length=128)
+    description: str | None = None
+
+
+class PartnerTierCreate(PartnerTierBase):
+    pass
+
+
+class PartnerTierUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=128)
+    description: str | None = None
+
+
+class PartnerTierOut(PartnerTierBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class PartnerBase(BaseModel):
+    type: Literal["customer_referrer", "affiliate", "agency", "strategic"]
+    name: str = Field(max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+    tier_id: uuid.UUID | None = None
+
+
+class PartnerCreate(PartnerBase):
+    pass
+
+
+class PartnerUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    email: str | None = Field(default=None, max_length=320)
+    tier_id: uuid.UUID | None = None
+    status: Literal["pending", "approved", "rejected", "suspended"] | None = None
+
+
+class PartnerOut(PartnerBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    status: str
+    referral_code: str
+    created_at: datetime
+
+
+class PartnerApplicationCreate(BaseModel):
+    """Public application to become a partner (no auth required)."""
+
+    type: Literal["customer_referrer", "affiliate", "agency", "strategic"]
+    form_data: dict = Field(default_factory=dict)
+
+
+class PartnerApplicationOut(ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    partner_id: uuid.UUID | None
+    type: str
+    form_data: dict
+    status: str
+    reviewed_by: uuid.UUID | None
+    created_at: datetime
+
+
+class PartnerUserCreate(BaseModel):
+    """Create a portal login for an approved partner (owner/admin)."""
+
+    partner_id: uuid.UUID
+    email: str = Field(max_length=320)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class PartnerUserOut(ORMModel):
+    id: uuid.UUID
+    partner_id: uuid.UUID | None
+    email: str
+    is_active: bool
+    created_at: datetime
+
+
+class PortalLoginRequest(BaseModel):
+    email: str = Field(max_length=320)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PortalLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class PortalProfileOut(BaseModel):
+    partner_id: uuid.UUID
+    business_id: uuid.UUID
+    email: str
+    name: str
+    type: str
+    status: str
+    referral_code: str
+    referral_link: str
+    tier_name: str | None
+
+
+class StripeOrderEventOut(ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    stripe_event_id: str
+    event_type: str
+    created_at: datetime

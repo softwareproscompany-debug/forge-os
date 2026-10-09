@@ -47,6 +47,11 @@ export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
 
+/** Absolute URL for an API path (used for binary fetches like TTS audio). */
+export function apiUrl(path: string): string {
+  return `${API_BASE}${API_PREFIX}${path}`;
+}
+
 export function setToken(token: string | null): void {
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
@@ -58,6 +63,8 @@ interface RequestOptions {
   params?: Record<string, string | number | boolean | undefined | null>;
   /** Skip attaching the auth header (login/register). */
   unauthenticated?: boolean;
+  /** AbortSignal to cancel the request (used by Draven's interrupt). */
+  signal?: AbortSignal;
 }
 
 function buildUrl(path: string, params?: RequestOptions["params"]): string {
@@ -76,7 +83,7 @@ export async function apiFetch<T>(
   path: string,
   options: RequestOptions = {},
 ): Promise<T> {
-  const { method = "GET", body, params, unauthenticated = false } = options;
+  const { method = "GET", body, params, unauthenticated = false, signal } = options;
   const headers: Record<string, string> = {
     Accept: "application/json",
   };
@@ -92,6 +99,7 @@ export async function apiFetch<T>(
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
     });
   } catch (err) {
     throw new ApiError(
@@ -453,6 +461,45 @@ export const contactApi = {
 export const templateApi = {
   list(): Promise<Template[]> {
     return apiFetch<unknown>("/templates").then(asItems<Template>);
+  },
+  listPage(params?: { limit?: number }): Promise<Page<Template>> {
+    return apiFetch<unknown>("/templates", { params }).then(asPage<Template>);
+  },
+  get(id: string): Promise<Template> {
+    return apiFetch<Template>(`/templates/${id}`);
+  },
+  create(data: {
+    name: string;
+    channel: Channel;
+    subject_template?: string | null;
+    body_template: string;
+    variables: string[];
+  }): Promise<Template> {
+    return apiFetch<Template>("/templates", { method: "POST", body: data });
+  },
+  update(
+    id: string,
+    data: Partial<{
+      name: string;
+      channel: Channel;
+      subject_template: string | null;
+      body_template: string;
+      variables: string[];
+    }>,
+  ): Promise<Template> {
+    return apiFetch<Template>(`/templates/${id}`, { method: "PUT", body: data });
+  },
+  remove(id: string): Promise<void> {
+    return apiFetch<void>(`/templates/${id}`, { method: "DELETE" });
+  },
+  preview(
+    id: string,
+    variables: Record<string, string>,
+  ): Promise<{ subject: string | null; body: string }> {
+    return apiFetch<{ subject: string | null; body: string }>(
+      `/templates/${id}/preview`,
+      { method: "POST", body: { variables } },
+    );
   },
 };
 

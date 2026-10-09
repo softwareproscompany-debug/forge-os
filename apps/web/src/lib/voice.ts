@@ -25,6 +25,8 @@ export interface UseVoiceOpts {
   /** When true, the mic re-arms automatically after each TTS reply. */
   conversationMode: boolean;
   speakReplies: boolean;
+  /** Speaking rate for TTS replies (0.7–1.3). Defaults to 1.02. */
+  rate?: number;
 }
 
 /**
@@ -32,15 +34,15 @@ export interface UseVoiceOpts {
  * spoken aloud → mic re-arms. Works with the Web Speech API built into
  * Chrome, Edge, Safari (iOS/iPadOS 14.5+) — no keys, no servers.
  */
-export function useVoice({ onResult, conversationMode, speakReplies }: UseVoiceOpts) {
+export function useVoice({ onResult, conversationMode, speakReplies, rate = 1.02 }: UseVoiceOpts) {
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [interim, setInterim] = useState("");
   const [error, setError] = useState<string | null>(null);
   const recRef = useRef<SpeechRecognitionT | null>(null);
   const wantListen = useRef(false);
-  const optsRef = useRef({ onResult, conversationMode, speakReplies });
-  optsRef.current = { onResult, conversationMode, speakReplies };
+  const optsRef = useRef({ onResult, conversationMode, speakReplies, rate });
+  optsRef.current = { onResult, conversationMode, speakReplies, rate };
 
   const stopSpeaking = useCallback(() => {
     if (ttsSupported()) {
@@ -154,7 +156,7 @@ export function useVoice({ onResult, conversationMode, speakReplies }: UseVoiceO
       setListening(false);
       setInterim("");
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.02;
+      u.rate = optsRef.current.rate ?? 1.02;
       u.pitch = 0.9;
       // Prefer a natural/en voice when the platform offers one.
       const voices = window.speechSynthesis.getVoices();

@@ -69,6 +69,31 @@ __all__ = [
     "AffiliateLink",
     "DravenToolRun",
     "DravenProviderConfig",
+    "MarketResearchJob",
+    "MarketOpportunity",
+    "MarketSnapshot",
+    "MarketSource",
+    "ResearchJobStatus",
+    "RecommendationStatus",
+    "LeadStatus",
+    "QualificationVerdict",
+    "RunState",
+    "StepState",
+    "AlphaApprovalStatus",
+    "OutboundStatus",
+    "DuplicateStatus",
+    "Lead",
+    "LeadDuplicate",
+    "QualificationRules",
+    "QualificationResult",
+    "WorkflowRun",
+    "WorkflowStep",
+    "WorkflowTransition",
+    "AlphaApproval",
+    "OutboundMessage",
+    "ActionEvidence",
+    "LeadSource",
+    "BusinessSecret",
 ]
 
 
@@ -519,6 +544,17 @@ class AutopilotSettings(Base):
     daily_send_cap: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=500)
     quiet_hours_start: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=22)
     quiet_hours_end: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=8)
+    # Card 4 planner schedule (per business; the hourly cron gates on these).
+    # plan_day: local weekday 0=Monday..6=Sunday. plan_hour: local hour 0-23.
+    # plan_cadence: "weekly" | "biweekly". last_planned_at: most recent draft
+    # (cron or manual run-now) — the biweekly gate uses it to enforce the
+    # ~13-day minimum gap between drafts.
+    plan_day: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    plan_hour: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=6)
+    plan_cadence: Mapped[str] = mapped_column(String(16), nullable=False, default="weekly")
+    last_planned_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = _created_at()
 
 
@@ -629,8 +665,10 @@ class WeeklySummary(Base):
 
 
 class ContentPlan(Base):
-    """Card 4 autopilot weekly content plan. Drafted Monday 06:00, approved
-    by a human, then materialized into a scheduled campaign.
+    """Card 4 autopilot weekly content plan. Drafted at the business's
+    configured plan moment (default local Monday 06:00, weekly), approved
+    by a human, then materialized into a running campaign — approval is
+    the launch gate, so the week runs itself.
 
     ``week_start`` is the target Monday (date). ``items`` is a list of
     ``{"kind", "channel", "day" (0=Monday), "title", "brief", "asset_id"?}``.
@@ -754,6 +792,9 @@ class DravenToolRun(Base):
     risk tools never execute; the request is recorded instead), and
     ``error``. Lets operators see exactly what the assistant proposed,
     ran, or asked permission for.
+
+    ``agent_id`` / ``swarm_run_id`` attribute the row to a swarm agent run
+    when set (NULL for direct chat tool calls).
     """
 
     __tablename__ = "draven_tool_runs"
@@ -769,7 +810,84 @@ class DravenToolRun(Base):
     risk: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     duration_ms: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    agent_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    swarm_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("draven_swarm_runs.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = _created_at()
+
+
+class DravenSwarmRunStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    completed = "completed"
+    failed = "failed"
+
+
+class DravenSwarmRun(Base):
+    """One orchestrated multi-agent run.
+
+    The supervisor decomposes the goal into subtasks, fans out to the 12
+    agents (see ``app/draven_swarm.py``), and synthesizes a result. Every
+    agent action executes through the real tool registry and is audit-
+    logged to ``draven_tool_runs`` (attributed via ``swarm_run_id``).
+    """
+
+    __tablename__ = "draven_swarm_runs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    goal: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    context: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[DravenSwarmRunStatus] = mapped_column(
+        sa.Enum(DravenSwarmRunStatus, name="draven_swarm_run_status"),
+        nullable=False,
+        default=DravenSwarmRunStatus.queued,
+    )
+    current_phase: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    agent_results: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    result_summary: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        sa.DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class DravenSwarmEvent(Base):
+    """Append-only live event feed for a swarm run.
+
+    The frontend polls these (no fabricated activity — every row is written
+    by the orchestrator or an agent at the moment the thing happens).
+    ``seq`` gives total ordering per run for ``?after=`` polling.
+    """
+
+    __tablename__ = "draven_swarm_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    swarm_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("draven_swarm_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    seq: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    agent_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    message: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.UniqueConstraint("swarm_run_id", "seq", name="uq_swarm_events_run_seq"),
+        sa.Index("ix_swarm_events_run_seq", "swarm_run_id", "seq"),
+    )
 
 
 class DravenProviderConfig(Base):
@@ -800,4 +918,621 @@ class DravenProviderConfig(Base):
         default=lambda: datetime.now().astimezone(),
         onupdate=lambda: datetime.now().astimezone(),
         server_default=sa.func.now(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Draven Market Intelligence
+# ---------------------------------------------------------------------------
+
+
+class ResearchJobStatus(str, enum.Enum):
+    """Lifecycle of a market research job (deterministic staged pipeline)."""
+
+    queued = "queued"
+    running = "running"
+    done = "done"
+    failed = "failed"
+
+
+class RecommendationStatus(str, enum.Enum):
+    """Executive decision on a product opportunity."""
+
+    prioritize = "PRIORITIZE"
+    test_limited = "TEST_WITH_LIMITED_CAPITAL"
+    watch = "WATCH_FOR_BETTER_TIMING"
+    research_further = "RESEARCH_FURTHER"
+    reject = "REJECT"
+    undecided = "UNDECIDED"
+
+
+class MarketResearchJob(Base):
+    """One market-intelligence research run.
+
+    The research pipeline is a deterministic staged pipeline (collect →
+    normalize → score → economics → report), not an autonomous agent swarm.
+    ``params`` holds the research parameters plus the inferred defaults
+    shown to the user; ``audit_trail`` records each pipeline stage with
+    timestamps and connector outcomes; ``results`` summarizes completed
+    output (opportunity ids, counts, evidence gaps).
+    """
+
+    __tablename__ = "market_research_jobs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    assumptions: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[ResearchJobStatus] = mapped_column(
+        _enum_col(ResearchJobStatus, length=16), nullable=False,
+        default=ResearchJobStatus.queued,
+    )
+    progress: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    results: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    audit_trail: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    error: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MarketOpportunity(Base):
+    """A researched product opportunity with full evidence provenance.
+
+    Every quantitative field that comes from a connector is paired with
+    provenance in the JSON columns (source, measurement period, retrieved
+    at, geographic scope, confidence). Fields without provenance are
+    labeled ``estimated`` in reports — never presented as measured fact.
+
+    ``demand_indicators``: list of {kind, value, source, period, retrieved_at,
+    geo, confidence} where kind ∈ {"search_interest", "marketplace_indicator",
+    "confirmed_sales", "listing_count", "analyst_estimate", "forecast"}.
+    Search interest is NEVER converted to units sold without a documented,
+    validated estimation model (there is none in the foundation slice).
+
+    ``price_evidence``: list of {price, currency, source, observed_at,
+    kind ∈ {"advertised", "observed", "supplier_quote"}}.
+    """
+
+    __tablename__ = "market_opportunities"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    research_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID,
+        ForeignKey("market_research_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(480), nullable=False)
+    category: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    description: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    identifiers: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    source_urls: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    price_evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    demand_indicators: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    seasonality_profile: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    competition_summary: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    unit_economics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    sourcing_evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    risk_flags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    score_components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    opportunity_score: Mapped[Optional[float]] = mapped_column(
+        sa.Float, nullable=True
+    )
+    confidence_score: Mapped[Optional[float]] = mapped_column(
+        sa.Float, nullable=True
+    )
+    evidence_gaps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+
+    recommendation: Mapped[RecommendationStatus] = mapped_column(
+        _enum_col(RecommendationStatus, length=32), nullable=False,
+        default=RecommendationStatus.undecided,
+    )
+    saved: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )
+
+
+class MarketSnapshot(Base):
+    """Point-in-time snapshot of an opportunity's score and economics.
+
+    Written whenever an opportunity is created or rescored, so users can
+    compare opportunities over time. Append-only; never updated.
+    """
+
+    __tablename__ = "market_snapshots"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    opportunity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("market_opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    research_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID,
+        ForeignKey("market_research_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    opportunity_score: Mapped[Optional[float]] = mapped_column(sa.Float, nullable=True)
+    confidence_score: Mapped[Optional[float]] = mapped_column(sa.Float, nullable=True)
+    score_components: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    unit_economics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    recommendation: Mapped[RecommendationStatus] = mapped_column(
+        _enum_col(RecommendationStatus, length=32), nullable=False,
+        default=RecommendationStatus.undecided,
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class MarketSource(Base):
+    """Connector capability registry (one row per connector per business).
+
+    Records what a connector can actually do — data available, auth,
+    rate limits, geo/historical coverage, pricing, refresh frequency,
+    blind spots — plus live health. ``configured`` is False until real
+    credentials are present; the UI shows that honestly.
+    """
+
+    __tablename__ = "market_sources"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    connector: Mapped[str] = mapped_column(String(64), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    capability: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    configured: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    last_check_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_check_ok: Mapped[Optional[bool]] = mapped_column(sa.Boolean, nullable=True)
+    last_check_note: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint("business_id", "connector", name="uq_market_source_biz_conn"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Alpha workflows — lead-to-follow-up reliability slice
+# ---------------------------------------------------------------------------
+
+
+class LeadStatus(str, enum.Enum):
+    new = "new"
+    validated = "validated"
+    qualified = "qualified"
+    unqualified = "unqualified"
+    needs_review = "needs_review"
+    duplicate = "duplicate"
+    archived = "archived"
+
+
+class QualificationVerdict(str, enum.Enum):
+    qualified = "qualified"
+    unqualified = "unqualified"
+    needs_review = "needs_review"
+
+
+class RunState(str, enum.Enum):
+    """Durable workflow state machine (see docs/ALPHA_WORKFLOWS.md).
+
+    received → validating → (needs_review | normalizing) → qualifying →
+    (needs_review | decided | drafting) → awaiting_approval →
+    (rejected | drafting | rechecking) → submitting →
+    (confirming | reconciling | failed) → completed.
+    Terminal: needs_review, decided, rejected, completed, failed, cancelled.
+    """
+
+    received = "received"
+    validating = "validating"
+    normalizing = "normalizing"
+    qualifying = "qualifying"
+    drafting = "drafting"
+    awaiting_approval = "awaiting_approval"
+    rechecking = "rechecking"
+    submitting = "submitting"
+    confirming = "confirming"
+    reconciling = "reconciling"
+    needs_review = "needs_review"
+    decided = "decided"
+    rejected = "rejected"
+    completed = "completed"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class StepState(str, enum.Enum):
+    pending = "pending"
+    running = "running"
+    ok = "ok"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class AlphaApprovalStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    expired = "expired"
+    invalidated = "invalidated"
+
+
+class OutboundStatus(str, enum.Enum):
+    """Outbound message lifecycle. ``submitted`` means the provider accepted
+    the request — it is NEVER presented as inbox delivery. ``confirmed``
+    requires a positive ``verify_outcome`` read-back."""
+
+    draft = "draft"
+    approved = "approved"
+    sending = "sending"
+    submitted = "submitted"
+    confirmed = "confirmed"
+    failed = "failed"
+    unknown = "unknown"
+
+
+class DuplicateStatus(str, enum.Enum):
+    pending = "pending"
+    merged = "merged"
+    dismissed = "dismissed"
+
+
+class Lead(Base):
+    """Normalized lead record. ``raw_payload`` preserves the original event;
+    ``source_event_id`` + ``business_id`` is unique for webhook idempotency
+    (NULLs are distinct on both Postgres and SQLite)."""
+
+    __tablename__ = "leads"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_event_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True, index=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    company: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    raw_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    provenance: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[LeadStatus] = mapped_column(
+        _enum_col(LeadStatus), nullable=False, default=LeadStatus.new
+    )
+    duplicate_of_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("leads.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "business_id", "source_event_id", name="uq_leads_biz_source_event"
+        ),
+    )
+
+
+class LeadDuplicate(Base):
+    """Fuzzy duplicate candidate — always requires human review; a candidate
+    never triggers a second follow-up on its own."""
+
+    __tablename__ = "lead_duplicates"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    candidate_lead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False
+    )
+    match_reason: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    status: Mapped[DuplicateStatus] = mapped_column(
+        _enum_col(DuplicateStatus), nullable=False, default=DuplicateStatus.pending
+    )
+    resolved_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class QualificationRules(Base):
+    """Versioned, immutable-once-used qualification rules per business."""
+
+    __tablename__ = "qualification_rules"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    version: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    rules: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    threshold: Mapped[float] = mapped_column(sa.Float, nullable=False, default=0.6)
+    is_active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.UniqueConstraint("business_id", "version", name="uq_qual_rules_biz_ver"),
+    )
+
+
+class QualificationResult(Base):
+    """Deterministic verdict for one lead under one rules version."""
+
+    __tablename__ = "qualification_results"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    rules_version: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    verdict: Mapped[QualificationVerdict] = mapped_column(
+        _enum_col(QualificationVerdict), nullable=False
+    )
+    score: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(sa.Float, nullable=False)
+    criteria: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class WorkflowRun(Base):
+    """One durable execution of the lead-to-follow-up state machine."""
+
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("leads.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    state: Mapped[RunState] = mapped_column(
+        _enum_col(RunState, length=32), nullable=False, default=RunState.received
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        String(128), nullable=False, unique=True, index=True
+    )
+    current_step: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    retry_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    paused: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=False)
+    cost_cents: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    latency_ms: Mapped[Optional[int]] = mapped_column(sa.Integer, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )
+
+
+class WorkflowStep(Base):
+    """One step execution inside a run (for the ledger timeline)."""
+
+    __tablename__ = "workflow_steps"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[StepState] = mapped_column(
+        _enum_col(StepState), nullable=False, default=StepState.pending
+    )
+    attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    evidence: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    error: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ended_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class WorkflowTransition(Base):
+    """Append-only audit of every state transition."""
+
+    __tablename__ = "workflow_transitions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    actor: Mapped[str] = mapped_column(String(128), nullable=False)
+    from_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    to_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class AlphaApproval(Base):
+    """Approval bound to an immutable payload digest. Any material edit to
+    the payload invalidates the approval (status → invalidated)."""
+
+    __tablename__ = "alpha_approvals"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[AlphaApprovalStatus] = mapped_column(
+        _enum_col(AlphaApprovalStatus, length=32),
+        nullable=False,
+        default=AlphaApprovalStatus.pending,
+    )
+    requested_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approver_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class OutboundMessage(Base):
+    """One outbound follow-up. ``submitted`` = provider accepted the request
+    (never presented as inbox delivery); ``confirmed`` requires a positive
+    ``verify_outcome`` read-back."""
+
+    __tablename__ = "outbound_messages"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    approval_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("alpha_approvals.id", ondelete="SET NULL"), nullable=True
+    )
+    recipient: Mapped[str] = mapped_column(String(320), nullable=False)
+    subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    body: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="stub")
+    provider_message_id: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True, index=True
+    )
+    status: Mapped[OutboundStatus] = mapped_column(
+        _enum_col(OutboundStatus, length=32),
+        nullable=False,
+        default=OutboundStatus.draft,
+    )
+    idempotency_key: Mapped[str] = mapped_column(
+        String(128), nullable=False, unique=True, index=True
+    )
+    send_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    last_error: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )
+
+
+class ActionEvidence(Base):
+    """Verified evidence for consequential actions (connector, result)."""
+
+    __tablename__ = "action_evidence"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID,
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    step: Mapped[str] = mapped_column(String(128), nullable=False)
+    connector: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class BusinessSecret(Base):
+    """Centralized encrypted API-key vault (Settings).
+
+    One row per ``(business_id, key_name)``. ``value_enc`` is a Fernet token
+    — never plaintext, never returned to any client. Consumers read via
+    ``app.settings_vault`` (server-side decrypt only).
+
+    Known key names: ``elevenlabs.api_key``, ``anthropic.api_key``,
+    ``openai.api_key``, ``openai.base_url``, ``dataforseo.login``,
+    ``dataforseo.password``, ``webhook.<source>.secret``.
+    """
+
+    __tablename__ = "business_secrets"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    key_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    value_enc: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    label: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "business_id", "key_name", name="uq_business_secrets_biz_key"
+        ),
+    )
+
+
+class LeadSource(Base):
+    """Webhook intake sources with HMAC secrets (Fernet-encrypted)."""
+
+    __tablename__ = "lead_sources"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret_enc: Mapped[str] = mapped_column(sa.Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.UniqueConstraint("business_id", "source", name="uq_lead_source_biz_src"),
     )

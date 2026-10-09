@@ -20,8 +20,10 @@ No network anywhere: ``LLM_PROVIDER=stub``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
+from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -32,6 +34,8 @@ os.environ.setdefault("LLM_PROVIDER", "stub")
 os.environ.setdefault("CHANNEL_MODE", "stub")
 
 from forge_db.models import (  # noqa: E402
+    AffiliateLink,
+    AffiliateProgram,
     Asset,
     AssetKind,
     AssetStatus,
@@ -40,6 +44,8 @@ from forge_db.models import (  # noqa: E402
     Business,
     Channel,
     Contact,
+    Event,
+    EventKind,
     Send,
     SendStatus,
     WeeklySummary,
@@ -48,6 +54,8 @@ from forge_db.models import (  # noqa: E402
 from worker import jobs  # noqa: E402
 from worker.jobs import (  # noqa: E402
     _business_tz,
+    _latest_summary_text,
+    _weekly_affiliate_stats,
     _is_summary_moment,
     _stub_recommendation,
     _summarize_business_if_due,
@@ -525,3 +533,155 @@ class TestOriginationWiring:
         assert result["ok"] is True
         assert result["status"] == "in_review"
         assert result["provider"] == "stub"
+
+
+# ---------------------------------------------------------------------------
+# Affiliate evidence (weekly summary extension)
+# ---------------------------------------------------------------------------
+
+
+def _program(db: Session, business: Business, name: str = "Gear Picks") -> AffiliateProgram:
+    p = AffiliateProgram(
+        business_id=business.id,
+        name=name,
+        network="amazon",
+        default_commission_pct=Decimal("4.000"),
+        status="active",
+    )
+    db.add(p)
+    db.flush()
+    return p
+
+
+def _aff_link(db: Session, business: Business, program: AffiliateProgram, slug: str) -> AffiliateLink:
+    link = AffiliateLink(
+        business_id=business.id,
+        program_id=program.id,
+        label=f"Link {slug}",
+        slug=slug,
+        destination_url=f"https://example.com/{slug}?tag=x",
+        is_active=True,
+    )
+    db.add(link)
+    db.flush()
+    return link
+
+
+def _aff_event(
+    db: Session,
+    business: Business,
+    kind: EventKind,
+    link: AffiliateLink,
+    program: AffiliateProgram,
+    commission: str | None = None,
+) -> None:
+    payload: dict = {"link_id": str(link.id), "program_id": str(program.id)}
+    if commission is not None:
+        payload["commission_usd"] = float(commission)
+        payload["order_value_usd"] = 100.0
+    db.add(
+        Event(
+            business_id=business.id,
+            contact_id=None,
+            kind=kind.value,
+            payload=payload,
+            created_at=IN_WINDOW,
+        )
+    )
+
+
+def test_weekly_affiliate_stats_top_links_and_earnings(db_url, db):
+    from decimal import Decimal as _D
+
+    business = _business(db)
+    program = _program(db, business)
+    hot = _aff_link(db, business, program, "hot-deal")
+    cold = _aff_link(db, business, program, "cold-deal")
+    quiet = _aff_link(db, business, program, "quiet-deal")
+    db.commit()
+
+    for _ in range(10):
+        _aff_event(db, business, EventKind.affiliate_clicked, hot, program)
+    for _ in range(2):  # 20% conversion
+        _aff_event(db, business, EventKind.affiliate_converted, hot, program, commission="4.0")
+    for _ in range(8):
+        _aff_event(db, business, EventKind.affiliate_clicked, cold, program)
+    # quiet-deal: only 4 clicks -> below the 5-click minimum, excluded.
+    for _ in range(4):
+        _aff_event(db, business, EventKind.affiliate_clicked, quiet, program)
+    db.commit()
+
+    since = datetime(2026, 10, 4, 23, 30, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 11, 23, 30, tzinfo=timezone.utc)
+    top, earnings = _weekly_affiliate_stats(db, business.id, since, until)
+
+    assert earnings == _D("8.0")
+    assert [e["link_id"] for e in top] == [str(hot.id), str(cold.id)]
+    assert top[0]["conversion_rate"] == pytest.approx(0.2)
+    assert top[0]["earnings_usd"] == pytest.approx(8.0)
+    assert top[0]["program_name"] == "Gear Picks"
+    assert top[1]["clicks"] == 8
+    assert top[1]["conversions"] == 0
+
+
+def test_weekly_affiliate_stats_empty(db_url, db):
+    business = _business(db)
+    since = datetime(2026, 10, 4, 23, 30, tzinfo=timezone.utc)
+    until = datetime(2026, 10, 11, 23, 30, tzinfo=timezone.utc)
+    top, earnings = _weekly_affiliate_stats(db, business.id, since, until)
+    assert top == []
+    assert earnings == 0
+
+
+def test_summarize_stores_affiliate_columns(db_url, db):
+    business = _business(db)
+    program = _program(db, business)
+    link = _aff_link(db, business, program, "star-offer")
+    db.commit()
+    for _ in range(6):
+        _aff_event(db, business, EventKind.affiliate_clicked, link, program)
+    _aff_event(db, business, EventKind.affiliate_converted, link, program, commission="4.0")
+    db.commit()
+
+    created = asyncio.run(_summarize_business_if_due(db, business, SUNDAY_2330))
+    assert created is True
+    summary = db.query(WeeklySummary).one()
+    assert len(summary.affiliate_top_links) == 1
+    assert summary.affiliate_top_links[0]["label"] == "Link star-offer"
+    assert float(summary.affiliate_earnings_usd) == pytest.approx(4.0)
+    # The generation brief names the top offer ("do more of this").
+    brief = _latest_summary_text(db, business.id)
+    assert brief is not None
+    assert "star-offer" in brief
+
+
+@pytest.mark.asyncio
+async def test_generate_asset_appends_ftc_disclosure(db_url, db, monkeypatch):
+    """Affiliate assets ship with the FTC disclosure auto-appended."""
+    from worker.jobs import _as_uuid  # noqa
+
+    business = _business(db)
+    db.add(AutopilotSettings(business_id=business.id))
+    asset = Asset(
+        business_id=business.id,
+        kind=AssetKind.email_copy,
+        title="Affiliate review",
+        variables={"prompt": "Write a short review of the espresso maker at https://shop.example/r/maker"},
+        status=AssetStatus.draft,
+        is_affiliate_content=True,
+    )
+    db.add(asset)
+    db.commit()
+    asset_id = str(asset.id)
+    db.close()
+
+    result = await generate_asset(FAKE_CTX, asset_id)
+    assert result["ok"] is True
+
+    engine = create_engine(db_url, connect_args={"check_same_thread": False})
+    with Session(engine) as check:
+        saved = check.get(Asset, uuid.UUID(asset_id))
+        assert saved is not None
+        assert "affiliate links" in (saved.body or "").lower()
+        assert any("affiliate disclosure" in v for v in result["guardrail_violations"])
+    engine.dispose()

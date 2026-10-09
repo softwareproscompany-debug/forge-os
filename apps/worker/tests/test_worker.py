@@ -546,7 +546,7 @@ class TestSendMessage:
 class TestCampaignTick:
     async def test_bulk_enroll_and_advance(self, db, db_url):
         b = _business(db)
-        _autopilot(db, b)
+        _autopilot(db, b, quiet_hours_start=0, quiet_hours_end=0)  # no quiet window
         c1 = _contact(db, b, email="a@example.com")
         c2 = _contact(db, b, email="b@example.com")
         _contact(db, b, email="unsub@example.com", unsubscribed=True)
@@ -599,7 +599,7 @@ class TestCampaignTick:
 
     async def test_daily_cap_blocks_sends(self, db, db_url):
         b = _business(db)
-        _autopilot(db, b, daily_send_cap=1)
+        _autopilot(db, b, daily_send_cap=1, quiet_hours_start=0, quiet_hours_end=0)
         contact = _contact(db, b)
         camp = _campaign(db, b, starts_at=datetime.now(UTC) - timedelta(hours=1))
         tmpl = _template(db, b)
@@ -663,7 +663,7 @@ class TestCampaignTick:
 
     async def test_enrollment_completes_after_last_step(self, db, db_url):
         b = _business(db)
-        _autopilot(db, b)
+        _autopilot(db, b, quiet_hours_start=0, quiet_hours_end=0)
         contact = _contact(db, b)
         camp = _campaign(db, b, starts_at=datetime.now(UTC) - timedelta(hours=1))
         tmpl = _template(db, b)

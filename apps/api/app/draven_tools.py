@@ -43,6 +43,7 @@ from forge_db.models import (
     ContentPlan,
     DravenToolRun,
     GenerationLog,
+    MarketOpportunity,
     Send,
     Template,
     User,
@@ -604,11 +605,15 @@ async def execute_tool(
     db: Session,
     user: User,
     raw_input: dict[str, Any] | None,
+    agent_id: str | None = None,
+    swarm_run_id: Any | None = None,
 ) -> dict[str, Any]:
     """Validate, execute (or hold for approval), and audit one tool call.
 
     Returns a result dict with ``tool``, ``risk``, ``status``,
     ``duration_ms`` plus either ``output`` / ``approval`` / ``error``.
+    ``agent_id`` / ``swarm_run_id`` attribute the audit row to a swarm
+    agent run (None for direct chat calls).
     """
     started = time.perf_counter()
     tool = TOOLS.get(tool_id)
@@ -629,7 +634,10 @@ async def execute_tool(
                 result = _error(f"tool execution failed: {exc}")
 
     duration_ms = int((time.perf_counter() - started) * 1000)
-    write_audit_row(db, user, tool_id, risk, raw_input or {}, result, duration_ms)
+    write_audit_row(
+        db, user, tool_id, risk, raw_input or {}, result, duration_ms,
+        agent_id=agent_id, swarm_run_id=swarm_run_id,
+    )
 
     return {
         "tool": tool_id,
@@ -648,6 +656,8 @@ def write_audit_row(
     raw_input: dict[str, Any],
     result: dict[str, Any],
     duration_ms: int,
+    agent_id: str | None = None,
+    swarm_run_id: Any | None = None,
 ) -> None:
     """Persist one ``draven_tool_runs`` audit row (best-effort, never raises)."""
     try:
@@ -661,6 +671,8 @@ def write_audit_row(
                 risk=risk,
                 status=result.get("status", "error"),
                 duration_ms=duration_ms,
+                agent_id=agent_id,
+                swarm_run_id=swarm_run_id,
             )
         )
         db.commit()
@@ -705,6 +717,83 @@ def _extract_name_fragment(message: str, keywords: list[str]) -> str | None:
     return None
 
 
+def _extract_market_params(message: str) -> dict[str, Any]:
+    """Best-effort research params from natural language.
+
+    Understands: result counts ("find 20 products"), month names,
+    years, markets ("in the US", "United States", "UK"), ticket tiers
+    ("low-ticket", "high-ticket"), and a trailing category/question focus.
+    Everything not found is left for normalize_params defaults.
+    """
+    from app.market_intel.pipeline import MONTHS
+
+    params: dict[str, Any] = {}
+    msg = message.lower()
+
+    m = re.search(r"\b(?:find|show|get|list|compare)\s+(\d{1,3})\b", msg)
+    if m:
+        params["max_results"] = max(1, min(int(m.group(1)), 100))
+
+    for name, num in MONTHS.items():
+        if re.search(rf"\b{name}\b", msg):
+            params["target_month"] = num
+            break
+    m = re.search(r"\b(20\d{2})\b", msg)
+    if m:
+        params["target_year"] = int(m.group(1))
+
+    if re.search(r"\bunited states\b|\bthe us\b|\bin us\b|\bu\.s\.", msg):
+        params["market"] = "US"
+    elif re.search(r"\bunited kingdom\b|\buk\b", msg):
+        params["market"] = "GB"
+    elif re.search(r"\bcanada\b", msg):
+        params["market"] = "CA"
+    elif re.search(r"\baustralia\b", msg):
+        params["market"] = "AU"
+    elif re.search(r"\bgermany\b", msg):
+        params["market"] = "DE"
+
+    if re.search(r"low[- ]ticket", msg):
+        params["ticket_tier"] = "low"
+    elif re.search(r"high[- ]ticket", msg):
+        params["ticket_tier"] = "high"
+    elif re.search(r"mid[- ]ticket", msg):
+        params["ticket_tier"] = "mid"
+
+    # Category: text after "in <category>" / "for <category>" that is not a
+    # month, year, or market phrase.
+    m = re.search(
+        r"\b(?:in|for)\s+([a-zA-Z][a-zA-Z &\-']{2,40}?)(?:\s+products?|\s+items?|\s+opportunit|\s*$)",
+        message,
+        re.IGNORECASE,
+    )
+    if m:
+        frag = m.group(1).strip()
+        if frag.lower() not in (
+            "the us", "us", "united states", "november", "december",
+            "october", "september", "general",
+        ) and not re.search(r"\b(20\d{2})\b", frag):
+            params["category"] = frag
+    # Category: "<words> products" directly after find/show (e.g.
+    # "find home fitness products likely to sell in November").
+    if "category" not in params:
+        m = re.search(
+            r"\b(?:find|show|get|list|compare)\s+(?:\d{1,3}\s+)?"
+            r"([a-zA-Z][a-zA-Z &\-']{2,40}?)\s+(?:products?|gadgets?|items?)\b",
+            message,
+            re.IGNORECASE,
+        )
+        if m:
+            frag = m.group(1).strip()
+            first = frag.split()[0].lower() if frag.split() else ""
+            if first not in (
+                "me", "you", "my", "your", "the", "some", "those",
+                "these", "us", "all",
+            ) and frag.lower() not in ("some", "good", "best", "top", "new"):
+                params["category"] = frag
+    return params
+
+
 def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
     """Map a message to candidate (tool_id, input) pairs.
 
@@ -727,8 +816,49 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         name = _extract_name_fragment(message, ["approve"])
         add("draven.asset_approve", {"asset_title": name} if name else {})
 
+    # Alpha workflow intents (before generic approval/contact rules so the
+    # lead-to-follow-up verbs win).
+    _email_in_msg = re.search(
+        r"[\w.+-]+@[\w-]+\.[\w.]+", message
+    )
+    _email_hint = _email_in_msg.group(0) if _email_in_msg else None
+
+    if re.search(r"process (this |the )?lead|add (a |the )?lead|new lead|"
+                 r"intake.*lead|create (a |the )?lead", msg):
+        add("alpha.lead_intake", {"email": _email_hint} if _email_hint else {})
+    if re.search(r"qualify (this |the |that )?lead|qualify lead", msg):
+        add("alpha.qualify_lead", {"email": _email_hint} if _email_hint else {})
+    if re.search(r"draft (a |the )?follow[- ]?up|prepare (a |the )?follow[- ]?up|"
+                 r"follow[- ]?up (draft|for)|write (a |the )?follow[- ]?up", msg):
+        add("alpha.prepare_followup", {"email": _email_hint} if _email_hint else {})
+    if re.search(r"approve (the |this |that )?follow[- ]?up", msg):
+        add("alpha.approve_followup", {"email": _email_hint} if _email_hint else {})
+    if re.search(r"(workflow|run|lead) status|status of.*(run|workflow|lead)|"
+                 r"where is (the |this )?lead", msg):
+        add("alpha.run_status", {"email": _email_hint} if _email_hint else {})
+
+    # Market intelligence intents (before generic search — a "find N
+    # products" ask is market research, not a contact search).
+    if re.search(
+        r"product|opportunit|market research|sell (well|in)|trending products|"
+        r"niche|seasonal products",
+        msg,
+    ) and re.search(
+        r"find|show|get|list|compare|research|discover|what.*sell|which.*sell",
+        msg,
+    ) and not re.search(r"top|best|strongest", msg):
+        add("market.research_start", _extract_market_params(message))
+    if re.search(r"research (job |run )?(status|progress)", msg):
+        add("market.research_status", {})
+    if re.search(r"top opportunit|best opportunit|strongest opportunit", msg):
+        add("market.top_opportunities", {})
+
     # Read-only intents.
-    if re.search(r"approv|review|pending|in[- ]review|queue", msg):
+    # Skip the generic review queue when the message is really about the
+    # weekly content plan — the autopilot rules below own that.
+    if re.search(r"approv|review|pending|in[- ]review|queue", msg) and not re.search(
+        r"weekly plan|content plan", msg
+    ):
         add("draven.approvals_pending", {})
         if re.search(r"detail|show me|full", msg):
             add("draven.assets_pending_review", {})
@@ -738,13 +868,261 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         add("draven.campaigns_status", {})
     if re.search(r"performance|analytics|metrics|stats|statistic|report", msg):
         add("draven.analytics_summary", {})
-    if re.search(r"\bcontact\b|find|search|look\s+up|who is|who's", msg):
+    # Skip contact search when the message is really a market-research ask
+    # ("find 20 products…", "research status") — the market intent owns it —
+    # or an explicit contact LISTING ("list my contacts").
+    if "market.research_start" not in seen and "market.research_status" not in seen \
+            and "draven.contacts_list" not in seen \
+            and re.search(
+        r"\bcontact\b|find|search|look\s+up|who is|who's", msg
+    ):
         query = _extract_search_query(message)
         add("draven.contacts_search", {"query": query} if query else {})
     if re.search(r"\bsummary\b|today|business|overview|how is|brief", msg):
         add("draven.business_summary", {})
     if re.search(r"autopilot|weekly plan|content plan", msg):
         add("draven.autopilot_status", {})
+
+    # --- Voice parity intents (brand kits, contacts, templates, assets,
+    # --- campaigns, autopilot writes, affiliates, analytics, interview,
+    # --- ops, business) ----------------------------------------------
+
+    # Brand kits
+    if re.search(r"brand[- ]?kit", msg):
+        if re.search(r"\bcreate\b|\bnew\b|\bmake\b", msg):
+            name = _extract_name_fragment(message, ["create", "make", "new"])
+            add(
+                "draven.brandkit_create",
+                {"name": name} if name else {},
+            )
+        elif re.search(r"\bupdate\b|\bchange\b|\bedit\b", msg):
+            name = _extract_name_fragment(message, ["update", "change", "edit"])
+            add(
+                "draven.brandkit_update",
+                {"name": name} if name else {},
+            )
+        else:
+            add("draven.brandkit_list", {})
+
+    # Contacts — writes first (before the generic search above already ran,
+    # but listing is handled here via the seen-guard above).
+    if re.search(r"\blist\b.*\bcontacts?\b|\bcontacts?\b.*\blist\b|\bmy contacts\b|\ball contacts\b", msg):
+        add("draven.contacts_list", {})
+    if re.search(r"\badd\b.*\bcontact\b|\bnew contact\b|\bcreate\b.*\bcontact\b", msg):
+        add("draven.contact_create", {"email": _email_hint} if _email_hint else {})
+    if re.search(r"\bupdate\b.*\bcontact\b|\bedit\b.*\bcontact\b", msg):
+        frag = _extract_name_fragment(message, ["update", "edit"])
+        add(
+            "draven.contact_update",
+            {"email": frag or _email_hint} if (frag or _email_hint) else {},
+        )
+    if re.search(r"\bdelete\b.*\bcontact\b|\bremove\b.*\bcontact\b", msg):
+        frag = _extract_name_fragment(message, ["delete", "remove"])
+        add(
+            "draven.contact_delete",
+            {"email": frag or _email_hint} if (frag or _email_hint) else {},
+        )
+    if "consent" in msg and "contact" in msg:
+        frag = _extract_name_fragment(message, ["consent"])
+        channel = "sms" if re.search(r"\bsms\b", msg) else "email"
+        granted = not re.search(r"\brevoke\b|\bremove\b|\bwithdraw\b|\boff\b", msg)
+        inp: dict[str, Any] = {"channel": channel, "granted": granted}
+        if frag or _email_hint:
+            inp["email"] = frag or _email_hint
+        add("draven.contact_consent", inp)
+
+    # Templates
+    if "template" in msg:
+        if re.search(r"\bcreate\b|\bnew\b|\bmake\b", msg):
+            name = _extract_name_fragment(message, ["create", "make", "new"])
+            add("draven.template_create", {"name": name} if name else {})
+        elif re.search(r"\bpreview\b|\brender\b", msg):
+            name = _extract_name_fragment(message, ["preview", "render"])
+            vars_ = dict(
+                re.findall(r"\b([a-zA-Z_][a-zA-Z0-9_]*)=([^\s,;]+)", message)
+            )
+            add(
+                "draven.template_preview",
+                {**( {"name": name} if name else {}), "variables": vars_},
+            )
+        elif re.search(r"\bupdate\b|\bchange\b|\bedit\b", msg):
+            name = _extract_name_fragment(message, ["update", "change", "edit"])
+            add("draven.template_update", {"name": name} if name else {})
+        elif re.search(r"\bdelete\b|\bremove\b", msg):
+            name = _extract_name_fragment(message, ["delete", "remove"])
+            add(
+                "draven.template_delete",
+                {"name": name} if name else {},
+            )
+        elif re.search(r"\blist\b|\ball\b|\bmy\b|\bshow\b", msg):
+            add("draven.template_list", {})
+
+    # Assets — generate/submit/reject/versions/list (approve already above).
+    if re.search(r"\bgenerate\b", msg) and re.search(
+        r"asset|email|sms|copy|post|blog|ad\b", msg
+    ):
+        kind = "email_copy"
+        if re.search(r"\bsms\b|\btext\b", msg):
+            kind = "sms"
+        elif re.search(r"\bsocial\b|\bpost\b", msg):
+            kind = "social_post"
+        elif re.search(r"\bblog\b", msg):
+            kind = "blog"
+        elif re.search(r"\bad\b|\badvert", msg):
+            kind = "ad"
+        m = re.search(r"['\"]([^'\"]{2,120})['\"]", message)
+        title = m.group(1).strip() if m else None
+        if not title:
+            m2 = re.search(
+                r"\babout\s+([a-zA-Z0-9 ,&\-']{2,80}?)(?:\s*$|\.)",
+                message,
+                re.IGNORECASE,
+            )
+            title = m2.group(1).strip() if m2 else None
+        add(
+            "draven.asset_generate",
+            {**( {"title": title} if title else {}), "kind": kind},
+        )
+    if re.search(r"\bsubmit\b", msg) and "asset" in msg:
+        name = _extract_name_fragment(message, ["submit"])
+        add("draven.asset_submit", {"asset_title": name} if name else {})
+    if re.search(r"\breject\b", msg) and "asset" in msg:
+        name = _extract_name_fragment(message, ["reject"])
+        add("draven.asset_reject", {"asset_title": name} if name else {"reason": "rejected via voice"})
+    if re.search(r"\bversions?\b", msg) and "asset" in msg:
+        name = _extract_name_fragment(message, ["versions", "version"])
+        add("draven.asset_versions", {"asset_title": name} if name else {})
+    if re.search(r"\bmy assets\b|\ball assets\b|\blist\b.*\bassets?\b|\bassets?\b.*\blist\b", msg):
+        add("draven.assets_list", {})
+
+    # Campaigns — create/update/steps/launch/enrollments.
+    if re.search(r"\blaunch\b", msg) and "campaign" in msg:
+        name = _extract_name_fragment(message, ["launch"])
+        add("draven.campaign_launch", {"campaign_name": name} if name else {})
+    if re.search(r"\bcreate\b.*\bcampaign\b|\bnew campaign\b", msg):
+        name = _extract_name_fragment(message, ["create", "new"])
+        add("draven.campaign_create", {"name": name} if name else {})
+    if re.search(r"\bupdate\b.*\bcampaign\b|\bedit\b.*\bcampaign\b", msg):
+        name = _extract_name_fragment(message, ["update", "edit"])
+        add(
+            "draven.campaign_update",
+            {"campaign_name": name} if name else {},
+        )
+    if re.search(r"\bdetail\b|\bshow\b.*\bcampaign\b", msg) and "campaign" in msg \
+            and not re.search(r"\blaunch\b|\bpause\b|\bcreate\b|\bupdate\b", msg):
+        name = _extract_name_fragment(message, ["show", "detail"])
+        add("draven.campaign_get", {"campaign_name": name} if name else {})
+    # Campaign names usually precede the word ("the welcome campaign").
+    _before_campaign = re.search(
+        r"(?:the\s+)?([a-zA-Z0-9][a-zA-Z0-9 _\-']{1,50}?)\s+campaign\b",
+        message,
+        re.IGNORECASE,
+    )
+    _campaign_frag = (
+        _before_campaign.group(1).strip() if _before_campaign else None
+    )
+    if re.search(r"\badd\b.*\bsteps?\b|\bnew step\b", msg) and "campaign" in msg:
+        add(
+            "draven.campaign_steps_add",
+            (
+                {"campaign_name": _campaign_frag, "steps": []}
+                if _campaign_frag
+                else {"steps": []}
+            ),
+        )
+    if re.search(r"\benrollment", msg) and "campaign" in msg:
+        add(
+            "draven.campaign_enrollments",
+            {"campaign_name": _campaign_frag} if _campaign_frag else {},
+        )
+
+    # Autopilot writes.
+    if re.search(r"\bupdate\b.*\bautopilot\b|\bautopilot\b.*\bsettings\b", msg):
+        inp_ap: dict[str, Any] = {}
+        if re.search(r"auto[- ]?approve\s+(on|enable|enabled|true)", msg):
+            inp_ap["auto_approve"] = True
+        elif re.search(r"auto[- ]?approve\s+(off|disable|disabled|false)", msg):
+            inp_ap["auto_approve"] = False
+        m_cap = re.search(r"(?:daily\s+)?cap(?:\s+of)?\s+(\d{1,5})", msg)
+        if m_cap:
+            inp_ap["daily_send_cap"] = int(m_cap.group(1))
+        add("draven.autopilot_update", inp_ap)
+    if re.search(r"\bapprove\b", msg) and re.search(
+        r"weekly plan|content plan", msg
+    ):
+        add("draven.autopilot_plan_approve", {})
+
+    # Affiliates.
+    if "affiliate" in msg:
+        if re.search(r"\bearning|revenue|commission", msg):
+            add("draven.affiliate_earnings", {})
+        elif re.search(r"\blink", msg):
+            if re.search(r"\bcreate\b|\bnew\b|\bmake\b|\badd\b", msg):
+                add("draven.affiliate_link_create", {})
+            elif re.search(r"\bupdate\b|\bedit\b", msg):
+                slug = _extract_name_fragment(message, ["update", "edit"])
+                add(
+                    "draven.affiliate_link_update",
+                    {"slug": slug} if slug else {},
+                )
+            elif re.search(r"\bdelete\b|\bremove\b", msg):
+                slug = _extract_name_fragment(message, ["delete", "remove"])
+                add(
+                    "draven.affiliate_link_delete",
+                    {"slug": slug} if slug else {},
+                )
+            else:
+                add("draven.affiliate_links_list", {})
+        elif re.search(r"\bprogram", msg):
+            if re.search(r"\bcreate\b|\bnew\b|\bmake\b|\badd\b", msg):
+                name = _extract_name_fragment(message, ["create", "make", "new", "add"])
+                add(
+                    "draven.affiliate_program_create",
+                    {"name": name} if name else {},
+                )
+            elif re.search(r"\bupdate\b|\bedit\b", msg):
+                name = _extract_name_fragment(message, ["update", "edit"])
+                add(
+                    "draven.affiliate_program_update",
+                    {"name": name} if name else {},
+                )
+            elif re.search(r"\bdelete\b|\bremove\b", msg):
+                name = _extract_name_fragment(message, ["delete", "remove"])
+                add(
+                    "draven.affiliate_program_delete",
+                    {"name": name} if name else {},
+                )
+            else:
+                add("draven.affiliate_programs_list", {})
+
+    # Analytics extras.
+    if "funnel" in msg and "campaign" in msg:
+        add(
+            "draven.analytics_funnel",
+            {"campaign_name": _campaign_frag} if _campaign_frag else {},
+        )
+    if re.search(r"\bweekly summary\b", msg):
+        add("draven.analytics_weekly_summary", {})
+
+    # Interview.
+    if re.search(r"\binterview\b", msg):
+        if re.search(r"\bstart\b|\bbegin\b", msg):
+            add("draven.interview_start", {})
+        else:
+            add("draven.interview_status", {})
+
+    # Ops.
+    if re.search(r"\bmission control\b|\bactivity feed\b|\bops activity\b", msg):
+        add("draven.ops_activity", {})
+    if re.search(r"\bbrain\b|\bknowledge graph\b", msg):
+        add("draven.ops_brain", {})
+
+    # Business.
+    if re.search(r"\bupdate\b.*\bbusiness\b|\brename\b.*\bbusiness\b", msg):
+        name = _extract_name_fragment(message, ["update", "rename"])
+        add("draven.business_update", {"name": name} if name else {})
+    elif re.search(r"\bmy business\b|\bbusiness profile\b|\bbusiness settings\b", msg):
+        add("draven.business_get", {})
 
     return routed
 
@@ -753,3 +1131,11 @@ def tool_json_schema(tool_id: str) -> dict[str, Any]:
     """JSON Schema for a tool's input model (for GET /draven/tools)."""
     tool = TOOLS[tool_id]
     return tool.input_model.model_json_schema()
+
+
+
+# ---------------------------------------------------------------------------
+# Voice-parity tool pack (app/draven_tools_parity.py). Imported last so the
+# parity tools register into the same TOOLS registry above.
+# ---------------------------------------------------------------------------
+from app.draven_tools_parity import *  # noqa: F401,F403

@@ -78,6 +78,7 @@ from forge_db.models import (
     CampaignStep,
     CampaignStatus,
     Channel,
+    ComplianceIssue,
     Contact,
     ContentPlan,
     EnrollmentStatus,
@@ -2179,5 +2180,99 @@ async def weekly_summary(ctx: dict) -> dict[str, Any]:
             "businesses_processed": businesses_processed,
             "summaries_created": summaries_created,
         }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Compliance bot — daily scan for FTC/affiliate disclosure issues
+# ---------------------------------------------------------------------------
+
+
+async def compliance_scan(ctx: dict) -> dict[str, Any]:
+    """Daily cron: scan recent assets + campaigns for compliance issues.
+
+    The bot FLAGS for human review only — it never auto-deletes or
+    auto-edits anything. Findings go to ``compliance_issues`` (source=
+    "bot_scan") and surface in GET /api/v1/compliance/issues.
+    """
+    from app.compliance import check_text
+
+    summary = {"businesses": 0, "assets_scanned": 0, "issues_created": 0, "errors": 0}
+    try:
+        db = _new_session()
+    except Exception:
+        log.error("compliance_scan: database unavailable; run aborted")
+        return {"ok": False, "error": "database unavailable", **summary}
+
+    try:
+        businesses = db.query(Business).all()
+        for business in businesses:
+            summary["businesses"] += 1
+            try:
+                # Recent assets with body text (last 7 days, not yet resolved).
+                cutoff = utcnow() - timedelta(days=7)
+                assets = (
+                    db.query(Asset)
+                    .filter(
+                        Asset.business_id == business.id,
+                        Asset.created_at >= cutoff,
+                        Asset.body.isnot(None),
+                    )
+                    .order_by(Asset.created_at.desc())
+                    .limit(50)
+                    .all()
+                )
+                for asset in assets:
+                    summary["assets_scanned"] += 1
+                    # Skip if an open bot issue already exists for this asset.
+                    existing = (
+                        db.query(ComplianceIssue)
+                        .filter(
+                            ComplianceIssue.business_id == business.id,
+                            ComplianceIssue.subject_type == "asset",
+                            ComplianceIssue.subject_id == asset.id,
+                            ComplianceIssue.status == "open",
+                        )
+                        .first()
+                    )
+                    if existing:
+                        continue
+                    result = check_text(
+                        asset.body or "",
+                        content_type="social_post",
+                    )
+                    if not result.affiliate_detected or result.compliant:
+                        continue
+                    worst = max(
+                        (v.severity for v in result.violations),
+                        default="medium",
+                        key=lambda s: {"low": 0, "medium": 1, "high": 2}[s],
+                    )
+                    db.add(
+                        ComplianceIssue(
+                            business_id=business.id,
+                            source="bot_scan",
+                            pack_id=result.pack_id,
+                            content_type=result.content_type,
+                            subject_type="asset",
+                            subject_id=asset.id,
+                            subject_title=asset.title,
+                            severity=worst,
+                            violations=[v.to_dict() for v in result.violations],
+                            status="open",
+                        )
+                    )
+                    summary["issues_created"] += 1
+                db.commit()
+            except Exception:
+                db.rollback()
+                summary["errors"] += 1
+                log.exception(
+                    "compliance_scan: failed for business %s (others unaffected)",
+                    business.id,
+                )
+        log.info("compliance_scan done: %s", summary)
+        return {"ok": True, **summary}
     finally:
         db.close()

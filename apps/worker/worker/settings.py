@@ -31,6 +31,7 @@ from worker.jobs import (
     autopilot_plan,
     autopilot_plan_now,
     campaign_tick,
+    compliance_scan,
     generate_asset,
     handle_event,
     send_message,
@@ -110,6 +111,9 @@ class WorkerSettings:
         cron(campaign_tick, minute={*range(60)}),
         cron(autopilot_plan, hour={*range(24)}, minute={0, 15, 30, 45}),
         cron(weekly_summary, hour={*range(24)}, minute={0}),
+        # compliance_scan: daily at 03:00 UTC — flags FTC/affiliate issues
+        # for human review (never auto-edits or auto-deletes).
+        cron(compliance_scan, hour={3}, minute={0}),
     ]
     redis_settings = _redis_settings()
     queue_name = os.environ.get("ARQ_QUEUE_NAME", "forge")

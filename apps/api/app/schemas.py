@@ -328,6 +328,10 @@ class CampaignOut(CampaignBase, ORMModel):
     created_at: datetime
 
 
+class CampaignDetailOut(CampaignOut):
+    steps: list[CampaignStepOut] = []
+
+
 class EnrollmentOut(ORMModel):
     id: uuid.UUID
     campaign_id: uuid.UUID

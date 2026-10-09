@@ -24,7 +24,7 @@ async def enqueue_job(redis_url: str, job_name: str, *args: Any) -> str | None:
 
         pool = await create_pool(RedisSettings.from_dsn(redis_url))
         try:
-            job = await pool.enqueue_job(job_name, *args)
+            job = await pool.enqueue_job(job_name, *args, _queue_name="forge")
             return job.job_id
         finally:
             try:

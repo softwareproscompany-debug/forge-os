@@ -89,9 +89,13 @@ def create_campaign(
     return campaign
 
 
-@router.get("/{campaign_id}", response_model=schemas.CampaignOut)
+@router.get("/{campaign_id}", response_model=schemas.CampaignDetailOut)
 def get_campaign(campaign_id: uuid.UUID, user: CurrentUser, db: DbSession):
-    return _get_campaign(campaign_id, user, db)
+    campaign = _get_campaign(campaign_id, user, db)
+    # Ensure steps are loaded and ordered for the detail view.
+    db.refresh(campaign, attribute_names=["steps"])
+    campaign.steps.sort(key=lambda s: s.position)
+    return campaign
 
 
 @router.put("/{campaign_id}", response_model=schemas.CampaignOut)

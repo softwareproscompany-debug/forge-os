@@ -25,18 +25,39 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, Field
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Response,
+    status,
+)
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from forge_db.models import DravenProviderConfig, DravenToolRun, User
+from forge_db.models import (
+    DravenProviderConfig,
+    DravenSwarmEvent,
+    DravenSwarmRun,
+    DravenSwarmRunStatus,
+    DravenToolRun,
+    User,
+)
+from forge_db.session import SessionLocal
 from forge_llm import GenerationRequest, get_provider
 
+from app import draven_swarm as swarm
 from app.core.deps import CurrentSettings, CurrentUser, DbSession, require_role
 from app.draven_crypto import decrypt_secret, encrypt_secret, get_fernet
+from app import draven_conversation as conversation
+from app.draven_conversation import PendingIntent
+from app.settings_vault import service as vault
 from app.draven_tools import (
     DEFAULT_TOOL_TIMEOUT_S,
     TOOLS,
@@ -102,7 +123,16 @@ _VOICE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 def _elevenlabs_tts_key(
     db: Session, user: CurrentUser, settings
 ) -> str | None:
-    """Decrypted ElevenLabs API key for the business, or None if unconfigured."""
+    """Decrypted ElevenLabs API key for the business, or None if unconfigured.
+
+    Reads the vault first; falls back to the deprecated
+    ``draven_provider_config.tts_api_key_enc`` column during migration.
+    """
+    key = vault.get_secret(
+        db, user.business_id, "elevenlabs.api_key", settings.DRAVEN_CONFIG_KEY
+    )
+    if key:
+        return key
     row = _business_config(db, user.business_id)
     if row is None or row.tts_provider != "elevenlabs" or not row.tts_api_key_enc:
         return None
@@ -211,6 +241,26 @@ class ChatHistoryMsg(BaseModel):
 class DravenChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     history: list[ChatHistoryMsg] = Field(default_factory=list, max_length=20)
+    persona: Literal["draven", "calcifer"] = Field(default="draven")
+    client_tz: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "IANA timezone of the client (e.g. America/Chicago), used for "
+            "time-aware greetings. Unknown values are rejected."
+        ),
+    )
+
+    @field_validator("client_tz")
+    @classmethod
+    def _validate_tz(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError:
+            raise ValueError(f"unknown timezone: {v}")
+        return v
 
 
 class ToolUseOut(BaseModel):
@@ -304,6 +354,7 @@ class SpeakIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     voice_id: str = Field(min_length=1, max_length=64)
     model_id: str = Field(default="eleven_multilingual_v2", max_length=64)
+    output_format: str = Field(default="mp3_44100_192", max_length=32)
 
 
 class AuditItem(BaseModel):
@@ -336,10 +387,12 @@ def _business_config(
 
 
 def _build_provider_from_config(
-    row: DravenProviderConfig, settings
+    db: Session, business_id: uuid.UUID, row: DravenProviderConfig, settings
 ) -> tuple[Any, str | None]:
-    """Build an LLM provider from a decrypted business config row.
+    """Build an LLM provider from a business config row.
 
+    Key material comes from the settings vault first, with fallback to the
+    deprecated ``draven_provider_config`` columns during migration.
     Returns (provider, model). Raises ValueError on missing/invalid config.
     """
     from forge_llm.providers import (
@@ -349,16 +402,24 @@ def _build_provider_from_config(
     )
 
     fernet = get_fernet(settings.DRAVEN_CONFIG_KEY)
+    ck = settings.DRAVEN_CONFIG_KEY
+
+    def _vault_or_legacy(key_name: str, legacy_enc: str | None) -> str | None:
+        key = vault.get_secret(db, business_id, key_name, ck)
+        if key:
+            return key
+        return decrypt_secret(fernet, legacy_enc)
+
     if row.provider == "stub":
         return StubProvider(), "stub"
     if row.provider == "anthropic":
-        api_key = decrypt_secret(fernet, row.api_key_enc)
+        api_key = _vault_or_legacy("anthropic.api_key", row.api_key_enc)
         if not api_key:
             raise ValueError("anthropic provider is missing its API key")
         return AnthropicProvider(api_key=api_key, model=row.model), row.model
     if row.provider == "openai_compatible":
-        base_url = decrypt_secret(fernet, row.base_url_enc)
-        api_key = decrypt_secret(fernet, row.api_key_enc)
+        base_url = _vault_or_legacy("openai.base_url", row.base_url_enc)
+        api_key = _vault_or_legacy("openai.api_key", row.api_key_enc)
         if not base_url or not row.model:
             raise ValueError(
                 "openai_compatible provider needs a base URL and a model"
@@ -382,20 +443,26 @@ def _resolve_provider(
     """
     row = _business_config(db, user.business_id)
     if row is not None:
-        provider, _ = _build_provider_from_config(row, settings)
+        provider, _ = _build_provider_from_config(
+            db, user.business_id, row, settings
+        )
         return provider, provider.name
     provider = get_provider()
     return provider, provider.name
 
 
 def _tts_status(
-    db: Session, user: CurrentUser
+    db: Session, user: CurrentUser, settings
 ) -> TtsStatus:
     """TTS section for provider status/config responses. Never key material."""
     row = _business_config(db, user.business_id)
     tts_provider = (row.tts_provider if row else None) or "none"
     configured = tts_provider == "elevenlabs" and bool(
-        row and row.tts_api_key_enc
+        vault.get_secret(
+            db, user.business_id, "elevenlabs.api_key",
+            settings.DRAVEN_CONFIG_KEY,
+        )
+        or (row and row.tts_api_key_enc)
     )
     voice_count: int | None = None
     cached = _voices_cache.get(user.business_id)
@@ -414,14 +481,21 @@ def _config_status(
     row = _business_config(db, user.business_id)
     latency = _last_test_latency.get(user.business_id)
     latency_ms = latency[0] if latency else None
-    tts = _tts_status(db, user)
+    tts = _tts_status(db, user, settings)
+    ck = settings.DRAVEN_CONFIG_KEY
     if row is not None:
         if row.provider == "stub":
             configured = True
         elif row.provider == "anthropic":
-            configured = row.api_key_enc is not None
+            configured = (
+                vault.get_secret(db, user.business_id, "anthropic.api_key", ck)
+                is not None or row.api_key_enc is not None
+            )
         else:  # openai_compatible
-            configured = row.base_url_enc is not None and bool(row.model)
+            configured = (
+                vault.get_secret(db, user.business_id, "openai.base_url", ck)
+                is not None or row.base_url_enc is not None
+            ) and bool(row.model)
         return ProviderStatus(
             provider=row.provider,
             model=row.model,
@@ -456,13 +530,75 @@ def _config_status(
 # ---------------------------------------------------------------------------
 
 
-_DRAVEN_SYSTEM = (
-    "You are Draven, the voice-first executive assistant inside ForgeOS, a "
-    "marketing automation platform. Summarize ONLY using the tool results "
-    "below — never invent numbers, names, or statuses. If a result needs "
-    "human approval, say so plainly. Keep the reply under 120 words, plain "
-    "text, no markdown, no emojis."
-)
+# ---------------------------------------------------------------------------
+# Assistant personas: Draven (executive) and Calcifer (living fire model).
+# Personality scope is deliberately narrow — name, orb theme, identity
+# wording, system-prompt name. Tool behavior, safety rules, approvals, and
+# response substance are identical for both.
+# ---------------------------------------------------------------------------
+
+def time_salutation(now: datetime) -> str:
+    """Time-aware greeting. Business manners: never 'good night' — the
+    assistant is not signing off, so late night stays 'Good evening'."""
+    h = now.hour
+    if 5 <= h < 12:
+        return "Good morning"
+    if 12 <= h < 17:
+        return "Good afternoon"
+    return "Good evening"
+
+
+_PERSONAS: dict[str, dict[str, str]] = {
+    "draven": {
+        "name": "Draven",
+        "identity_reply": (
+            "I'm Draven — your voice-first executive assistant inside "
+            "ForgeOS. I can check approvals, campaigns, and analytics, "
+            "run product research, process leads, and take actions for "
+            "you (the risky ones need your approval first). What do you "
+            "need?"
+        ),
+        "system_prompt": (
+            "You are Draven, the voice-first executive assistant inside ForgeOS, a "
+            "marketing automation platform. Conduct yourself with polished business "
+            "manners: greet warmly, acknowledge each request, confirm before any "
+            "consequential action, and thank the user — professional and courteous, "
+            "never stiff or robotic. Summarize ONLY using the tool results "
+            "below — never invent numbers, names, or statuses. If a result needs "
+            "human approval, say so plainly. Keep the reply under 120 words, plain "
+            "text, no markdown, no emojis."
+        ),
+    },
+    "calcifer": {
+        "name": "Calcifer",
+        "identity_reply": (
+            "I'm Calcifer — a living fire model, and your loyal assistant inside "
+            "ForgeOS. I've got plenty of spark for the work: approvals, campaigns, "
+            "analytics, product research, lead follow-ups — say the word and I'll "
+            "get the flames going. The risky moves still need your approval first. "
+            "What are we lighting up today?"
+        ),
+        "system_prompt": (
+            "You are Calcifer, a living fire model and loyal assistant inside ForgeOS, a "
+            "marketing automation platform. You are warm, spirited, and energetic — a "
+            "wink of fire in your wording — but this is a business OS: stay professional, "
+            "precise, and helpful, never a comedy act. Mind your manners throughout: "
+            "greet warmly, acknowledge each request, confirm before any consequential "
+            "action, and thank the user. Summarize ONLY using the tool results "
+            "below — never invent numbers, names, or statuses. If a result needs "
+            "human approval, say so plainly. Keep the reply under 120 words, plain "
+            "text, no markdown, no emojis."
+        ),
+    },
+}
+
+
+def _persona_of(payload: DravenChatRequest) -> dict[str, str]:
+    """Validated persona; unknown values fall back to Draven."""
+    return _PERSONAS.get(payload.persona) or _PERSONAS["draven"]
+
+
+_DRAVEN_SYSTEM = _PERSONAS["draven"]["system_prompt"]
 
 
 def _deterministic_reply(results: list[dict[str, Any]]) -> str:
@@ -472,6 +608,16 @@ def _deterministic_reply(results: list[dict[str, Any]]) -> str:
         tid = r["tool"]
         status_ = r["status"]
         if status_ == "error":
+            # Missing research seeds → ask a clarification instead of erroring.
+            if tid == "market.research_start" and "seed_terms" in str(
+                r.get("error", "")
+            ):
+                parts.append(
+                    "I can run that research — which product category should I "
+                    "focus on? (e.g. home fitness, kitchen gadgets, pet supplies). "
+                    "Or give me a few seed keywords and I'll dig in."
+                )
+                continue
             parts.append(f"{tid} ran into a problem: {r.get('error')}.")
             continue
         if status_ == "approval_required":
@@ -543,10 +689,261 @@ def _deterministic_reply(results: list[dict[str, Any]]) -> str:
                 f"Autopilot auto-approve is "
                 f"{'on' if s.get('auto_approve') else 'off'}. {plan_txt}"
             )
+        elif tid == "market.research_start":
+            n = out.get("opportunity_count", 0)
+            conns = out.get("connectors_used") or []
+            gaps = out.get("evidence_gaps") or []
+            tops = out.get("top_opportunities") or []
+            names = ", ".join(
+                f"{t['name'][:40]} ({t['opportunity_score']:.0f})" for t in tops[:3]
+            )
+            live = (
+                f"Live data from {', '.join(conns)}."
+                if conns
+                else "No live data source is configured — "
+                "connect DataForSEO for live demand signals."
+            )
+            parts.append(
+                f"Research for {out.get('target')} ({out.get('market')}) is done: "
+                f"{n} opportunit{'ies' if n != 1 else 'y'}. {live}"
+                + (f" Top: {names}." if names else "")
+                + (
+                    f" Evidence gaps: {len(gaps)} noted in the full report."
+                    if gaps
+                    else ""
+                )
+            )
+        elif tid == "market.research_status":
+            if not out.get("found", True):
+                parts.append("No research jobs yet.")
+            else:
+                parts.append(
+                    f"Research job {str(out.get('job_id'))[:8]}: "
+                    f"{out.get('status')} ({out.get('progress', 0)}%)."
+                )
+        elif tid == "market.top_opportunities":
+            items = out.get("opportunities") or []
+            desc = ", ".join(
+                f"{o['name'][:40]} ({o['opportunity_score']:.0f})" for o in items[:5]
+            )
+            parts.append(
+                f"{out.get('count', 0)} top opportunities"
+                + (f": {desc}." if desc else
+                   " — none scored yet. Run a product research first.")
+            )
+        elif tid == "alpha.lead_intake":
+            q = out.get("qualification") or {}
+            verdict = q.get("verdict", "pending")
+            parts.append(
+                f"Lead captured ({'new' if out.get('created') else 'existing'}). "
+                f"Qualification: {verdict}"
+                + (f" (score {q.get('score'):.2f})." if q.get("score") is not None else ".")
+                + f" Run state: {out.get('run_state')}."
+            )
+        elif tid == "alpha.qualify_lead":
+            q = out.get("qualification") or {}
+            parts.append(
+                f"Qualification: {q.get('verdict', 'unknown')}"
+                + (f" (score {q.get('score'):.2f}, "
+                   f"confidence {q.get('confidence'):.2f}, "
+                   f"rules v{q.get('rules_version')})." if q.get("score") is not None else ".")
+            )
+        elif tid == "alpha.run_status":
+            parts.append(
+                f"Run {str(out.get('run_id'))[:8]}: {out.get('state')}"
+                + (" (paused)" if out.get("paused") else "")
+                + (f", {out.get('retry_count')} retries." if out.get("retry_count") else ".")
+            )
+        elif tid == "alpha.prepare_followup":
+            parts.append(
+                f"Follow-up draft ready — {out.get('approval_status', 'pending')} "
+                f"approval. Nothing has been sent; approve it when ready."
+            )
+        # --- Voice parity tools ------------------------------------------------
+        elif tid == "draven.brandkit_list":
+            n = out.get("count", 0)
+            names = ", ".join(
+                f"{k['name']} (v{k['version']})" for k in out.get("brand_kits", [])[:5]
+            )
+            parts.append(
+                f"{n} brand kit{'s' if n != 1 else ''}"
+                + (f": {names}." if names else ".")
+            )
+        elif tid in ("draven.brandkit_get", "draven.brandkit_create", "draven.brandkit_update"):
+            k = out.get("brand_kit") or {}
+            parts.append(
+                f"Brand kit '{k.get('name')}' (v{k.get('version')})"
+                + (f" — {out.get('note')}" if out.get("note") else ".")
+            )
+        elif tid in ("draven.contacts_list", "draven.contact_get",
+                     "draven.contact_create", "draven.contact_update"):
+            if "contacts" in out:
+                n = out.get("count", 0)
+                parts.append(f"{n} contact{'s' if n != 1 else ''} on file.")
+            else:
+                c = out.get("contact") or {}
+                label = " ".join(
+                    p for p in [c.get("first_name"), c.get("last_name")] if p
+                ) or c.get("email") or "contact"
+                parts.append(f"Contact: {label} ({c.get('email') or c.get('phone') or 'no address'}).")
+        elif tid == "draven.contact_consent":
+            parts.append(out.get("note", "Consent updated."))
+        elif tid in ("draven.template_list", "draven.template_get",
+                     "draven.template_create", "draven.template_update"):
+            if "templates" in out:
+                n = out.get("count", 0)
+                names = ", ".join(
+                    f"{t['name']} ({t['channel']})" for t in out.get("templates", [])[:5]
+                )
+                parts.append(
+                    f"{n} template{'s' if n != 1 else ''}"
+                    + (f": {names}." if names else ".")
+                )
+            else:
+                t = out.get("template") or {}
+                parts.append(f"Template '{t.get('name')}' ({t.get('channel')}) ready.")
+        elif tid == "draven.template_preview":
+            body = (out.get("body") or "")[:400]
+            parts.append(
+                f"Preview of '{out.get('template_name')}': {body}"
+                + ("…" if len(out.get("body") or "") > 400 else "")
+            )
+        elif tid == "draven.assets_list":
+            n = out.get("count", 0)
+            titles = ", ".join(
+                f"{a['title']} ({a['status']})" for a in out.get("assets", [])[:5]
+            )
+            parts.append(
+                f"{n} asset{'s' if n != 1 else ''}"
+                + (f": {titles}." if titles else ".")
+            )
+        elif tid in ("draven.asset_get", "draven.asset_submit"):
+            a = out.get("asset") or {}
+            parts.append(
+                f"Asset '{a.get('title')}' ({a.get('kind')}, {a.get('status')})"
+                + (f" — {out.get('note')}" if out.get("note") else ".")
+            )
+        elif tid == "draven.asset_versions":
+            parts.append(f"{out.get('count', 0)} versions in this asset's lineage.")
+        elif tid in ("draven.campaign_get", "draven.campaign_create", "draven.campaign_update"):
+            c = out.get("campaign") or {}
+            steps = out.get("steps")
+            parts.append(
+                f"Campaign '{c.get('name')}' ({c.get('status')})"
+                + (f" with {len(steps)} steps" if steps is not None else "")
+                + (f" — {out.get('note')}" if out.get("note") else ".")
+            )
+        elif tid == "draven.campaign_steps_add":
+            parts.append(
+                f"Added {out.get('added', 0)} step{'s' if out.get('added', 0) != 1 else ''} "
+                f"to the campaign."
+            )
+        elif tid == "draven.campaign_step_update":
+            s = out.get("step") or {}
+            parts.append(
+                f"Step {s.get('position')} updated ({s.get('channel')}, "
+                f"{s.get('delay_hours')}h delay)."
+            )
+        elif tid == "draven.campaign_enrollments":
+            parts.append(f"{out.get('count', 0)} enrollments on this campaign.")
+        elif tid == "draven.autopilot_update":
+            s = out.get("settings") or {}
+            parts.append(
+                f"Autopilot updated: auto-approve "
+                f"{'on' if s.get('auto_approve') else 'off'}, daily cap "
+                f"{s.get('daily_send_cap')}."
+            )
+        elif tid in ("draven.affiliate_programs_list", "draven.affiliate_program_get",
+                     "draven.affiliate_program_create", "draven.affiliate_program_update"):
+            if "programs" in out:
+                n = out.get("count", 0)
+                names = ", ".join(p["name"] for p in out.get("programs", [])[:5])
+                parts.append(
+                    f"{n} affiliate program{'s' if n != 1 else ''}"
+                    + (f": {names}." if names else ".")
+                )
+            else:
+                p = out.get("program") or {}
+                parts.append(
+                    f"Affiliate program '{p.get('name')}' ({p.get('status')}, "
+                    f"{p.get('default_commission_pct')}% default commission)."
+                )
+        elif tid in ("draven.affiliate_links_list", "draven.affiliate_link_get",
+                     "draven.affiliate_link_create", "draven.affiliate_link_update"):
+            if "links" in out:
+                n = out.get("count", 0)
+                parts.append(f"{n} trackable affiliate link{'s' if n != 1 else ''}.")
+            else:
+                link = out.get("link") or {}
+                parts.append(
+                    f"Affiliate link '{link.get('label')}' (/{link.get('slug')}) "
+                    f"{'active' if link.get('is_active') else 'inactive'}."
+                )
+        elif tid == "draven.affiliate_earnings":
+            t = out.get("totals") or {}
+            parts.append(
+                f"Last {out.get('days', 30)} days: {t.get('clicks', 0)} clicks, "
+                f"{t.get('conversions', 0)} conversions "
+                f"({round((t.get('conversion_rate') or 0) * 100, 1)}%), "
+                f"${(t.get('earnings_usd') or 0):.2f} earnings."
+            )
+        elif tid == "draven.analytics_funnel":
+            items = (out.get("funnel") or {}).get("items", [])
+            desc = ", ".join(
+                f"step {i.get('position')}: {i.get('sent')} sent / {i.get('opened')} opened"
+                for i in items[:5]
+            )
+            parts.append(
+                f"Funnel for '{out.get('campaign_name')}'"
+                + (f": {desc}." if desc else " — no steps yet.")
+            )
+        elif tid == "draven.analytics_weekly_summary":
+            if not out.get("found"):
+                parts.append("No weekly summary has been cut yet.")
+            else:
+                rec = (out.get("recommendation") or "")[:300]
+                parts.append(
+                    f"Week of {out.get('week_start')}: "
+                    f"{len(out.get('top_assets') or [])} top assets tracked. {rec}"
+                )
+        elif tid == "draven.interview_start":
+            parts.append(
+                f"Interview started (session {str(out.get('session_id'))[:8]}). "
+                f"Question 1 of {out.get('total_questions')}: {out.get('question')}"
+            )
+        elif tid == "draven.interview_status":
+            if not out.get("found"):
+                parts.append("No interview session yet — say 'start the brand interview'.")
+            else:
+                parts.append(
+                    f"Interview {out.get('status')}: question "
+                    f"{out.get('question_index')} of {out.get('total_questions')}."
+                )
+        elif tid == "draven.ops_activity":
+            c = out.get("counters") or {}
+            st = out.get("stages") or {}
+            running = (st.get("growth") or {}).get("campaigns_running", 0)
+            parts.append(
+                f"Mission control: {c.get('sends_today', 0)} sends today, "
+                f"{c.get('generations_today', 0)} generations, "
+                f"{running} campaigns running, {c.get('in_flight', 0)} in flight."
+            )
+        elif tid == "draven.ops_brain":
+            layers = out.get("layers") or []
+            desc = ", ".join(f"{ly['label']}: {ly['count']}" for ly in layers)
+            parts.append(
+                f"Knowledge graph ({out.get('link_count', 0)} links): {desc}."
+            )
+        elif tid in ("draven.business_get", "draven.business_update"):
+            parts.append(
+                f"Business: {out.get('name')} (timezone {out.get('timezone')})."
+            )
     if not parts:
         return (
             "I didn't find anything to act on. I can check approvals, "
-            "campaigns, analytics, contacts, or autopilot — what do you need?"
+            "campaigns, analytics, contacts, autopilot, brand kits, "
+            "templates, assets, affiliates, interviews, or the ops "
+            "dashboard — what do you need?"
         )
     return " ".join(parts)
 
@@ -579,12 +976,14 @@ async def chat(
 ) -> DravenChatResponse:
     global _kill_switch_at
     now = datetime.now(timezone.utc)
+    persona = _persona_of(payload)
+    pname = persona["name"]
 
     # Emergency stop: refuse new tool executions for 60s after POST /stop.
     if _kill_switch_at is not None and (now - _kill_switch_at).total_seconds() < 60:
         return DravenChatResponse(
             reply=(
-                "Draven is stopped — the emergency stop is active. "
+                f"{pname} is stopped — the emergency stop is active. "
                 "No tools were run. Say the word when you're ready to resume."
             ),
             tools_used=[],
@@ -594,6 +993,69 @@ async def chat(
         )
 
     routed = route_intent(payload.message)
+    provider, provider_name = _resolve_provider(db, user, settings)
+
+    # --- Conversational slot-filling -------------------------------------
+    # A routed intent is a new command: it supersedes any pending question.
+    # "cancel" drops the pending question. Anything else with no routed
+    # intent is treated as the answer to the pending question.
+    pending = conversation.get_pending(user.business_id)
+    fill_note = ""
+    if routed:
+        conversation.clear_pending(user.business_id)
+        pending = None
+    elif pending and conversation.looks_like_cancel(payload.message):
+        conversation.clear_pending(user.business_id)
+        return DravenChatResponse(
+            reply="No problem — dropped that.",
+            tools_used=[],
+            approvals_needed=[],
+            estimated_cost_usd=0.0,
+            provider=provider_name,
+        )
+
+    # Identity: the assistant knows its own name, with or without tools.
+    # It never consumes a pending question. With a valid client_tz, the
+    # reply opens with a time-aware salutation (proper manners); without
+    # one, no salutation is guessed.
+    if not routed and re.search(
+        r"\byour name\b|who are you\b|what are you called\b|"
+        r"introduce yourself\b|what is your name\b",
+        payload.message,
+        re.IGNORECASE,
+    ):
+        greeting = ""
+        if payload.client_tz:
+            greeting = (
+                f"{time_salutation(datetime.now(ZoneInfo(payload.client_tz)))}! "
+            )
+        return DravenChatResponse(
+            reply=f"{greeting}{persona['identity_reply']}",
+            tools_used=[],
+            approvals_needed=[],
+            estimated_cost_usd=0.0,
+            provider=provider_name,
+        )
+
+    # Fill the pending slot from the user's answer, then run the original
+    # tool with the completed input. Unmappable answers get a specific
+    # re-ask — the missing data is never invented.
+    if not routed and pending:
+        filled = conversation.fill_slot(pending, payload.message)
+        if filled is not None:
+            completed_input, fill_note = filled
+            conversation.clear_pending(user.business_id)
+            routed = [(pending.kind, completed_input)]
+        else:
+            conversation.refresh_pending(user.business_id, pending)
+            return DravenChatResponse(
+                reply=conversation.reask_text(pending),
+                tools_used=[],
+                approvals_needed=[],
+                estimated_cost_usd=0.0,
+                provider=provider_name,
+            )
+
     results: list[dict[str, Any]] = []
     for tool_id, raw_input in routed:
         tool = TOOLS[tool_id]
@@ -619,7 +1081,36 @@ async def chat(
             )
         results.append(result)
 
-    provider, provider_name = _resolve_provider(db, user, settings)
+    # Record a pending question wherever this turn asked the user for input.
+    for (tool_id, raw_input), r in zip(routed, results):
+        if (
+            r["status"] == "error"
+            and tool_id == "market.research_start"
+            and "seed_terms" in str(r.get("error", ""))
+        ):
+            conversation.set_pending(
+                user.business_id,
+                PendingIntent(
+                    kind=tool_id,
+                    missing_slots=["category"],
+                    partial_input=dict(raw_input or {}),
+                    ask_text="which product category should I research?",
+                ),
+            )
+        elif (
+            tool_id == "draven.contacts_search"
+            and r["status"] != "error"
+            and len((r.get("output") or {}).get("contacts", [])) == 0
+        ):
+            conversation.set_pending(
+                user.business_id,
+                PendingIntent(
+                    kind=tool_id,
+                    missing_slots=["query"],
+                    partial_input=dict(raw_input or {}),
+                    ask_text="which contact should I look up?",
+                ),
+            )
 
     # Compose the reply: real provider when configured, deterministic
     # real-data summary in stub mode.
@@ -639,20 +1130,20 @@ async def chat(
                 for r in results
             ]
             history_text = "\n".join(
-                f"{'User' if m.role == 'user' else 'Draven'}: {m.content}"
+                f"{'User' if m.role == 'user' else pname}: {m.content}"
                 for m in payload.history[-8:]
             )
             prompt = (
                 f"User message: {payload.message}\n\n"
                 f"Tool results (JSON):\n{json.dumps(slim, default=str)}\n\n"
-                f"Draven:"
+                f"{pname}:"
             )
             if history_text:
                 prompt = f"Conversation so far:\n{history_text}\n\n{prompt}"
             gen = await provider.generate(
                 GenerationRequest(
                     prompt=prompt,
-                    system_prompt=_DRAVEN_SYSTEM,
+                    system_prompt=persona["system_prompt"],
                     max_tokens=300,
                     temperature=0.4,
                 )
@@ -665,6 +1156,10 @@ async def chat(
             reply = _deterministic_reply(results) + (
                 f" (Note: live summarization failed: {str(exc)[:120]})"
             )
+
+    # Slot-fill confirmation: state what was understood before the results.
+    if fill_note:
+        reply = f"{fill_note} {reply}"
 
     tools_used = [
         ToolUseOut(
@@ -807,15 +1302,61 @@ def set_provider(
         else:
             row.api_key_enc = None
             row.base_url_enc = None
+    # Write-through: the vault is the canonical store for key material.
+    # The legacy columns above stay as the deprecated mirror.
+    ck = settings.DRAVEN_CONFIG_KEY
+    actor = f"user:{admin.id}"
+    if tts_provider == "elevenlabs" and tts_api_key:
+        vault.put_secret(
+            db, admin.business_id, "elevenlabs.api_key", tts_api_key,
+            actor=actor, config_key=ck,
+            label="ElevenLabs API key (Draven provider panel)",
+        )
+    elif tts_provider == "none":
+        vault.delete_secret(
+            db, admin.business_id, "elevenlabs.api_key",
+            actor=actor, config_key=ck,
+        )
+    if not tts_shorthand and fernet is not None:
+        if chat_provider == "anthropic" and payload.api_key:
+            vault.put_secret(
+                db, admin.business_id, "anthropic.api_key", payload.api_key,
+                actor=actor, config_key=ck,
+                label="Anthropic API key (Draven provider panel)",
+            )
+        elif chat_provider == "openai_compatible":
+            if payload.api_key:
+                vault.put_secret(
+                    db, admin.business_id, "openai.api_key", payload.api_key,
+                    actor=actor, config_key=ck,
+                    label="OpenAI-compatible API key (Draven provider panel)",
+                )
+            if payload.base_url:
+                vault.put_secret(
+                    db, admin.business_id, "openai.base_url", payload.base_url,
+                    actor=actor, config_key=ck,
+                    label="OpenAI-compatible base URL (Draven provider panel)",
+                )
     db.commit()
     db.refresh(row)
 
     return ProviderConfigOut(
         provider=row.provider,
         model=row.model,
-        has_api_key=row.api_key_enc is not None,
-        has_base_url=row.base_url_enc is not None,
-        tts=_tts_status(db, admin),
+        has_api_key=(
+            vault.get_secret(
+                db, admin.business_id,
+                "anthropic.api_key"
+                if row.provider == "anthropic" else "openai.api_key",
+                ck,
+            )
+            is not None or row.api_key_enc is not None
+        ),
+        has_base_url=(
+            vault.get_secret(db, admin.business_id, "openai.base_url", ck)
+            is not None or row.base_url_enc is not None
+        ),
+        tts=_tts_status(db, admin, settings),
         updated_at=row.updated_at,
     )
 
@@ -871,6 +1412,45 @@ async def test_provider(
 # ElevenLabs TTS endpoints
 # ---------------------------------------------------------------------------
 
+# Allowed output formats: (media_type, is_lossless_pcm).
+# Default is MP3 HD: it plays on every customer device (WAV caused support
+# confusion on some devices). Lossless WAV stays available for archival use.
+_TTS_FORMATS: dict[str, tuple[str, bool]] = {
+    "pcm_44100": ("audio/wav", True),  # 44.1kHz 16-bit PCM, lossless
+    "mp3_44100_192": ("audio/mpeg", False),  # 192kbps MP3, near-transparent
+    "mp3_44100_128": ("audio/mpeg", False),  # 128kbps MP3, bandwidth saver
+}
+
+
+def _pcm_to_wav(pcm: bytes, sample_rate: int = 44100) -> bytes:
+    """Wrap raw 16-bit mono PCM bytes in a WAV container.
+
+    ElevenLabs' pcm_* outputs are 16-bit little-endian mono at the requested
+    sample rate. The WAV header makes the lossless stream playable anywhere.
+    """
+    import struct
+
+    num_channels, bits_per_sample = 1, 16
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + len(pcm),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        len(pcm),
+    )
+    return header + pcm
+
 
 @router.get("/tts/voices", response_model=VoicesOut)
 async def tts_voices(
@@ -902,12 +1482,19 @@ async def tts_speak(
     db: DbSession,
     settings: CurrentSettings,
 ) -> Response:
-    """Synthesize speech via ElevenLabs; returns audio/mpeg.
+    """Synthesize speech via ElevenLabs; MP3 HD 192kbps by default.
 
     Guards: text length (2000 chars, enforced by schema), strict voice_id
     format, membership in the cached voice list when available, per-business
-    rate limit (20 req/min). Character usage + estimated cost are written
-    to the Draven audit log. The API key never appears in responses or logs.
+    rate limit (20 req/min), output_format allowlist. Character usage +
+    estimated cost are written to the Draven audit log. The API key never
+    appears in responses or logs.
+
+    Quality: ``mp3_44100_192`` is the default — near-transparent 192kbps
+    MP3 that plays on every customer device (WAV caused support confusion
+    on some devices). ``pcm_44100`` returns bit-perfect 44.1kHz 16-bit PCM
+    in a WAV container for archival quality; ``mp3_44100_128`` is the
+    bandwidth saver (e.g. satellite links on yachts/jets).
     """
     text = payload.text.strip()
     if not text:
@@ -920,6 +1507,13 @@ async def tts_speak(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="invalid voice_id format",
         )
+    fmt = _TTS_FORMATS.get(payload.output_format)
+    if fmt is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"unknown output_format (choose from {sorted(_TTS_FORMATS)})",
+        )
+    media_type, is_pcm = fmt
     if not _check_tts_rate_limit(user.business_id):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -955,7 +1549,11 @@ async def tts_speak(
             "POST",
             path,
             api_key,
-            json_body={"text": text, "model_id": payload.model_id},
+            json_body={
+                "text": text,
+                "model_id": payload.model_id,
+                "output_format": payload.output_format,
+            },
             timeout=30.0,
         )
     except (httpx.TimeoutException, httpx.TransportError) as exc:
@@ -978,13 +1576,16 @@ async def tts_speak(
         user,
         "draven.tts_speak",
         "low",
-        {"voice_id": payload.voice_id, "model_id": payload.model_id, "chars": chars},
+        {"voice_id": payload.voice_id, "model_id": payload.model_id,
+         "output_format": payload.output_format, "chars": chars},
         {
             "tool": "draven.tts_speak",
             "risk": "low",
             "status": "ok",
             "output": {
                 "chars": chars,
+                "output_format": payload.output_format,
+                "lossless": is_pcm,
                 "estimated_cost_usd": round(cost_usd, 6),
                 "note": "cost is an estimate from ElevenLabs published API rates",
             },
@@ -992,7 +1593,8 @@ async def tts_speak(
         },
         duration_ms,
     )
-    return Response(content=resp.content, media_type="audio/mpeg")
+    audio = _pcm_to_wav(resp.content) if is_pcm else resp.content
+    return Response(content=audio, media_type=media_type)
 
 
 @router.get("/audit", response_model=AuditOut)
@@ -1036,3 +1638,235 @@ def emergency_stop(user: CurrentUser) -> StopOut:
     global _kill_switch_at
     _kill_switch_at = datetime.now(timezone.utc)
     return StopOut(stopped=True, at=_kill_switch_at)
+
+
+# ---------------------------------------------------------------------------
+# Swarm endpoints
+# ---------------------------------------------------------------------------
+
+
+class SwarmAgentInfo(BaseModel):
+    id: str
+    name: str
+    role: str
+    allowed_tools: list[str]
+    max_depth: int
+
+
+class SwarmRunIn(BaseModel):
+    goal: str = Field(min_length=1, max_length=2000)
+    context: dict[str, Any] = Field(default_factory=dict)
+    demo: bool = Field(
+        default=False,
+        description="Use the seeded investor demo scenario as the goal.",
+    )
+
+
+class SwarmRunOut(BaseModel):
+    run_id: str
+    status: str
+
+
+class SwarmRunDetail(BaseModel):
+    run_id: str
+    goal: str
+    status: str
+    current_phase: str | None
+    agent_results: dict[str, Any]
+    result_summary: str | None
+    error: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class SwarmEventOut(BaseModel):
+    seq: int
+    agent_id: str | None
+    kind: str
+    message: str
+    data: dict[str, Any]
+    created_at: datetime
+
+
+class SwarmEventsOut(BaseModel):
+    events: list[SwarmEventOut]
+    latest_seq: int
+
+
+def _swarm_stopped() -> bool:
+    return (
+        _kill_switch_at is not None
+        and (datetime.now(timezone.utc) - _kill_switch_at).total_seconds() < 60
+    )
+
+
+def _get_swarm_run(
+    db: Session, user: CurrentUser, run_id: str
+) -> DravenSwarmRun:
+    try:
+        rid = uuid.UUID(str(run_id))
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="swarm run not found"
+        )
+    run = (
+        db.query(DravenSwarmRun)
+        .filter(
+            DravenSwarmRun.id == rid,
+            DravenSwarmRun.business_id == user.business_id,
+        )
+        .first()
+    )
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="swarm run not found"
+        )
+    return run
+
+
+async def _swarm_task(
+    run_id: uuid.UUID, user_id: uuid.UUID, settings
+) -> None:
+    """Background swarm execution with its own sessions (never the request's).
+
+    Every failure path marks the run failed with an honest error — a run
+    never hangs silently, which is what the stage demo depends on.
+    """
+    factory = SessionLocal(settings.DATABASE_URL)
+    db = factory()
+    try:
+        run = (
+            db.query(DravenSwarmRun)
+            .filter(DravenSwarmRun.id == run_id)
+            .first()
+        )
+        user = db.query(User).filter(User.id == user_id).first()
+        if run is None or user is None:
+            return
+        goal = run.goal
+        context = run.context or {}
+        try:
+            provider, provider_name = _resolve_provider(db, user, settings)
+        except ValueError as exc:
+            # Honest degradation: say what's missing, run nothing.
+            run.status = DravenSwarmRunStatus.failed
+            run.error = f"LLM provider misconfigured: {exc}"
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+        # Detach-safe: business_id/id are loaded (expire_on_commit=False).
+        db.expunge(user)
+        db.expunge(run)
+    finally:
+        db.close()
+
+    await swarm.run_swarm(
+        factory, user, provider, provider_name, run_id, goal, context
+    )
+
+
+@router.get("/swarm/agents", response_model=list[SwarmAgentInfo])
+def swarm_agents(user: CurrentUser) -> list[SwarmAgentInfo]:
+    """The 12 registered swarm agents (id, name, role, toolset, depth)."""
+    return [SwarmAgentInfo(**d) for d in swarm.agent_definitions()]
+
+
+@router.post("/swarm/run", response_model=SwarmRunOut, status_code=202)
+async def swarm_run(
+    payload: SwarmRunIn,
+    user: CurrentUser,
+    db: DbSession,
+    settings: CurrentSettings,
+    background: BackgroundTasks,
+) -> SwarmRunOut:
+    """Start a swarm run (202 + run_id; execution continues in background).
+
+    ``demo=true`` runs the seeded investor scenario. Poll
+    ``GET /swarm/runs/{id}/events`` for the live activity feed.
+    """
+    if _swarm_stopped():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Draven is stopped (emergency stop active) — no new runs.",
+        )
+    if payload.demo:
+        goal, context = swarm.demo_goal()
+        context = {**context, **(payload.context or {})}
+    else:
+        goal, context = payload.goal, payload.context or {}
+
+    run = DravenSwarmRun(
+        business_id=user.business_id,
+        user_id=user.id,
+        goal=goal,
+        context=context,
+        status=DravenSwarmRunStatus.queued,
+        current_phase="queued",
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    background.add_task(_swarm_task, run.id, user.id, settings)
+    return SwarmRunOut(run_id=str(run.id), status=run.status.value)
+
+
+@router.get("/swarm/runs/{run_id}", response_model=SwarmRunDetail)
+def swarm_run_status(
+    run_id: str, user: CurrentUser, db: DbSession
+) -> SwarmRunDetail:
+    """Run status + per-agent results + synthesized summary."""
+    run = _get_swarm_run(db, user, run_id)
+    return SwarmRunDetail(
+        run_id=str(run.id),
+        goal=run.goal,
+        status=run.status.value,
+        current_phase=run.current_phase,
+        agent_results=run.agent_results or {},
+        result_summary=run.result_summary,
+        error=run.error,
+        created_at=run.created_at,
+        completed_at=run.completed_at,
+    )
+
+
+@router.get("/swarm/runs/{run_id}/events", response_model=SwarmEventsOut)
+def swarm_run_events(
+    run_id: str,
+    user: CurrentUser,
+    db: DbSession,
+    after: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> SwarmEventsOut:
+    """Live activity feed for a run. Poll with ``?after=<latest_seq>``."""
+    run = _get_swarm_run(db, user, run_id)
+    rows = (
+        db.query(DravenSwarmEvent)
+        .filter(
+            DravenSwarmEvent.swarm_run_id == run.id,
+            DravenSwarmEvent.seq > after,
+        )
+        .order_by(DravenSwarmEvent.seq.asc())
+        .limit(limit)
+        .all()
+    )
+    latest = (
+        db.query(DravenSwarmEvent.seq)
+        .filter(DravenSwarmEvent.swarm_run_id == run.id)
+        .order_by(DravenSwarmEvent.seq.desc())
+        .first()
+    )
+    return SwarmEventsOut(
+        events=[
+            SwarmEventOut(
+                seq=r.seq,
+                agent_id=r.agent_id,
+                kind=r.kind,
+                message=r.message,
+                data=r.data or {},
+                created_at=r.created_at,
+            )
+            for r in rows
+        ],
+        latest_seq=latest[0] if latest else 0,
+    )

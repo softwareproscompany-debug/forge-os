@@ -19,7 +19,8 @@ const NAV = [
   { to: "/outbox", label: "Outbox", icon: "⎋" },
   { to: "/onboarding", label: "Onboarding", icon: "⚙" },
   { to: "/interview", label: "Interview", icon: "❝" },
-  { to: "/assistant", label: "Forge Voice", icon: "◍" },
+  { to: "/templates", label: "Templates", icon: "▤" },
+  { to: "/draven", label: "Draven", icon: "⬢" },
 ] as const;
 
 /** Redirects to /login when there is no authenticated user. */

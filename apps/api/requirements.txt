@@ -20,3 +20,4 @@ email-validator==2.3.0
 python-multipart==0.0.32
 pytest==8.4.2
 pytest-asyncio==1.4.0
+cryptography==50.0.2

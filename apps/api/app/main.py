@@ -10,12 +10,14 @@ from app.routers import (
     affiliates,
     analytics,
     assets,
+    assistant,
     auth,
     autopilot,
     brand_kits,
     businesses,
     campaigns,
     contacts,
+    draven,
     events,
     interview,
     ops,
@@ -64,6 +66,8 @@ def create_app() -> FastAPI:
         events.router,
         interview.router,
         affiliates.router,
+        assistant.router,
+        draven.router,
     ):
         app.include_router(router, prefix=prefix)
 

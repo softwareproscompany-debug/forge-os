@@ -67,6 +67,8 @@ __all__ = [
     "ContentPlan",
     "AffiliateProgram",
     "AffiliateLink",
+    "DravenToolRun",
+    "DravenProviderConfig",
 ]
 
 
@@ -743,3 +745,59 @@ def to_dict(obj: Base) -> dict[str, Any]:
             value = value.value
         out[column.name] = value
     return out
+
+
+class DravenToolRun(Base):
+    """Audit trail for every Draven tool execution.
+
+    Written for *all* outcomes — ``ok``, ``approval_required`` (medium/high
+    risk tools never execute; the request is recorded instead), and
+    ``error``. Lets operators see exactly what the assistant proposed,
+    ran, or asked permission for.
+    """
+
+    __tablename__ = "draven_tool_runs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    tool: Mapped[str] = mapped_column(String(128), nullable=False)
+    input: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    output_summary: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    risk: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    duration_ms: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class DravenProviderConfig(Base):
+    """Per-business Draven LLM provider configuration.
+
+    ``base_url_enc`` / ``api_key_enc`` hold Fernet-encrypted secrets —
+    never plaintext, never returned to clients. One row per business
+    (``business_id`` doubles as the primary key, like ``autopilot_settings``).
+    """
+
+    __tablename__ = "draven_provider_config"
+
+    business_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("businesses.id", ondelete="CASCADE"), primary_key=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    base_url_enc: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    api_key_enc: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    # TTS voice provider (separate from the chat LLM provider above).
+    # Currently "elevenlabs" or None. Key is Fernet-encrypted like api_key_enc.
+    tts_provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    tts_api_key_enc: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now().astimezone(),
+        onupdate=lambda: datetime.now().astimezone(),
+        server_default=sa.func.now(),
+    )

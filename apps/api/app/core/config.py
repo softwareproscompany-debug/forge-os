@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "*"  # comma-separated list; "*" = allow all (dev default)
     API_PREFIX: str = "/api/v1"
 
+    # -- draven -------------------------------------------------------------
+    # Fernet key (base64 urlsafe, 32 bytes) for encrypting per-business
+    # provider secrets in draven_provider_config. Generate with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # If empty, PUT /draven/provider fails closed (400) rather than storing
+    # plaintext secrets.
+    DRAVEN_CONFIG_KEY: str = ""
+
 
 def get_settings() -> Settings:
     return Settings()

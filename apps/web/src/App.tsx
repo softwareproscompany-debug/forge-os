@@ -17,6 +17,8 @@ import OpsPage from "./pages/Ops";
 import InterviewPage from "./pages/Interview";
 import BrainPage from "./pages/Brain";
 import AffiliatesPage from "./pages/Affiliates";
+import DravenPage from "./pages/Draven";
+import TemplatesPage from "./pages/Templates";
 
 export default function App() {
   return (
@@ -46,6 +48,8 @@ export default function App() {
             <Route path="/brain" element={<BrainPage />} />
             <Route path="/interview" element={<InterviewPage />} />
             <Route path="/affiliates" element={<AffiliatesPage />} />
+            <Route path="/draven" element={<DravenPage />} />
+            <Route path="/templates" element={<TemplatesPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

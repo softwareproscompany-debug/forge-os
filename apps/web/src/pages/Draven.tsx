@@ -263,7 +263,7 @@ export default function DravenPage() {
   );
 
   // Provider admin form
-  const [pProvider, setPProvider] = useState("stub");
+  const [pProvider, setPProvider] = useState("gemini");
   const [pModel, setPModel] = useState("");
   const [pBaseUrl, setPBaseUrl] = useState("");
   const [pKey, setPKey] = useState("");
@@ -1053,9 +1053,11 @@ export default function DravenPage() {
               <label className="dv-field">
                 <span>Provider</span>
                 <select value={pProvider} onChange={(e) => setPProvider(e.target.value)}>
-                  <option value="stub">stub (built-in, no key)</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="openai-compatible">OpenAI-compatible</option>
+                  <option value="gemini">Gemini (recommended)</option>
+                  <option value="anthropic">Anthropic (Claude)</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="ollama">Ollama (local / custom)</option>
+                  <option value="openai_compatible">OpenAI-compatible</option>
                   <option value="elevenlabs">ElevenLabs (voice/TTS)</option>
                 </select>
               </label>
@@ -1064,21 +1066,35 @@ export default function DravenPage() {
                 <input
                   value={pModel}
                   onChange={(e) => setPModel(e.target.value)}
-                  placeholder="e.g. claude-opus-4-6"
+                  placeholder={
+                    pProvider === "gemini"
+                      ? "e.g. gemini-3.5-flash-lite"
+                      : pProvider === "openrouter"
+                        ? "e.g. anthropic/claude-sonnet-4"
+                        : pProvider === "ollama"
+                          ? "e.g. llama3.1"
+                          : "e.g. claude-opus-4-6"
+                  }
                 />
               </label>
-              {pProvider === "openai-compatible" && (
+              {(pProvider === "ollama" || pProvider === "openai_compatible") && (
                 <label className="dv-field">
-                  <span>Base URL (https only)</span>
+                  <span>
+                    Base URL{pProvider === "ollama" ? " (optional — defaults to localhost)" : " (https only)"}
+                  </span>
                   <input
                     value={pBaseUrl}
                     onChange={(e) => setPBaseUrl(e.target.value)}
-                    placeholder="https://api.example.com/v1"
+                    placeholder={
+                      pProvider === "ollama"
+                        ? "http://localhost:11434/v1"
+                        : "https://api.example.com/v1"
+                    }
                     inputMode="url"
                   />
                 </label>
               )}
-              {pProvider !== "stub" && (
+              {pProvider !== "ollama" && (
                 <label className="dv-field">
                   <span>API key (stored encrypted, server-side only)</span>
                   <input

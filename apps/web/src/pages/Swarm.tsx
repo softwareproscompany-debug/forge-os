@@ -177,7 +177,7 @@ export default function Swarm() {
   }, [events]);
 
   const running = runStatus === "running" || runStatus === "queued" || runStatus === "starting";
-  const stubMode = provider?.provider === "stub";
+  const stubMode = provider != null && !provider.configured;
 
   return (
     <div className="sw">
@@ -197,7 +197,7 @@ export default function Swarm() {
           </span>
           {provider && (
             <span className={`sw-pill${provider.configured ? "" : " warn"}`}>
-              {provider.provider.toUpperCase()}{provider.configured ? "" : " · STUB"}
+              {provider.provider.toUpperCase()}{provider.configured ? "" : " · NOT CONFIGURED"}
             </span>
           )}
         </div>
@@ -205,7 +205,12 @@ export default function Swarm() {
 
       {stubMode && (
         <div className="sw-note" role="note">
-          Stub provider active — agents run their real tools and report real data; generative
+          {provider?.provider === "stub" ? (
+            <>Stub provider active — </>
+          ) : (
+            <>{provider?.provider.toUpperCase()} not connected — </>
+          )}
+          agents run their real tools and report real data; generative
           reasoning is skipped honestly (marked <em>degraded</em>, never invented). Connect a
           live provider in <Link to="/draven" className="sw-link">Draven → AI provider</Link> for
           full reasoning.

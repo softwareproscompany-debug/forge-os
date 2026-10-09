@@ -159,4 +159,4 @@ outbox (covered conversationally through campaigns/analytics/ops instead).
 
 ## Env
 - `DRAVEN_CONFIG_KEY` — Fernet key for provider credential encryption (required; fail-closed without it).
-- `LLM_PROVIDER=stub` currently; admin panel switches to anthropic/openai-compatible at runtime.
+- `LLM_PROVIDER=gemini` default (unconfigured until a key is connected); admin panel switches to gemini/anthropic/openrouter/ollama/openai-compatible at runtime.

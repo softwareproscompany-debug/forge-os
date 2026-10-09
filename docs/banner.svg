@@ -1,54 +1,64 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="384" viewBox="0 0 1280 384">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0b0e17"/>
-      <stop offset="0.55" stop-color="#111627"/>
-      <stop offset="1" stop-color="#0a0d16"/>
+      <stop offset="0" stop-color="#070910"/>
+      <stop offset="0.55" stop-color="#0c1020"/>
+      <stop offset="1" stop-color="#070910"/>
     </linearGradient>
-    <radialGradient id="ember1" cx="0.82" cy="0.35" r="0.45">
-      <stop offset="0" stop-color="#ff7a1a" stop-opacity="0.55"/>
-      <stop offset="0.5" stop-color="#ff7a1a" stop-opacity="0.12"/>
-      <stop offset="1" stop-color="#ff7a1a" stop-opacity="0"/>
+    <radialGradient id="neon1" cx="0.82" cy="0.35" r="0.45">
+      <stop offset="0" stop-color="#00f5ff" stop-opacity="0.5"/>
+      <stop offset="0.5" stop-color="#00f5ff" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#00f5ff" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="ember2" cx="0.12" cy="0.85" r="0.4">
-      <stop offset="0" stop-color="#ff9a3c" stop-opacity="0.28"/>
-      <stop offset="1" stop-color="#ff9a3c" stop-opacity="0"/>
+    <radialGradient id="neon2" cx="0.12" cy="0.85" r="0.4">
+      <stop offset="0" stop-color="#ff2bd6" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#ff2bd6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="neon3" cx="0.5" cy="1.1" r="0.5">
+      <stop offset="0" stop-color="#9d4edd" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#9d4edd" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="title" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#ff8c2b"/>
+      <stop offset="0" stop-color="#00f5ff"/>
       <stop offset="0.45" stop-color="#ffffff"/>
       <stop offset="0.75" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#ff8c2b"/>
+      <stop offset="1" stop-color="#ff2bd6"/>
     </linearGradient>
     <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#ff8c2b"/>
-      <stop offset="1" stop-color="#ff8c2b" stop-opacity="0"/>
+      <stop offset="0" stop-color="#00f5ff"/>
+      <stop offset="1" stop-color="#00f5ff" stop-opacity="0"/>
     </linearGradient>
   </defs>
 
   <rect width="1280" height="384" fill="url(#bg)"/>
-  <rect width="1280" height="384" fill="url(#ember1)"/>
-  <rect width="1280" height="384" fill="url(#ember2)"/>
+  <rect width="1280" height="384" fill="url(#neon1)"/>
+  <rect width="1280" height="384" fill="url(#neon2)"/>
+  <rect width="1280" height="384" fill="url(#neon3)"/>
 
   <!-- network nodes, right side -->
-  <g stroke="#ff8c2b" stroke-opacity="0.35" stroke-width="1">
+  <g stroke="#00f5ff" stroke-opacity="0.35" stroke-width="1">
     <line x1="980" y1="90" x2="1070" y2="140"/><line x1="1070" y1="140" x2="1150" y2="100"/>
     <line x1="1070" y1="140" x2="1120" y2="220"/><line x1="980" y1="90" x2="940" y2="200"/>
     <line x1="940" y1="200" x2="1030" y2="260"/><line x1="1120" y1="220" x2="1210" y2="260"/>
     <line x1="1150" y1="100" x2="1210" y2="180"/><line x1="1030" y1="260" x2="1120" y2="220"/>
     <line x1="940" y1="200" x2="880" y2="300"/><line x1="1210" y1="180" x2="1240" y2="90"/>
   </g>
-  <g fill="#ffb35c">
+  <g fill="#00f5ff">
     <circle cx="980" cy="90" r="4"/><circle cx="1070" cy="140" r="5"/>
     <circle cx="1150" cy="100" r="3.5"/><circle cx="1120" cy="220" r="4.5"/>
-    <circle cx="940" cy="200" r="3.5"/><circle cx="1030" cy="260" r="4"/>
-    <circle cx="1210" cy="260" r="3"/><circle cx="1210" cy="180" r="4"/>
-    <circle cx="880" cy="300" r="3"/><circle cx="1240" cy="90" r="3"/>
+    <circle cx="940" cy="200" r="3.5"/>
+  </g>
+  <g fill="#ff2bd6">
+    <circle cx="1030" cy="260" r="4"/><circle cx="1210" cy="260" r="3"/>
+    <circle cx="1210" cy="180" r="4"/><circle cx="880" cy="300" r="3"/>
+    <circle cx="1240" cy="90" r="3"/>
   </g>
   <!-- rising sparks -->
-  <g fill="#ff9a3c" opacity="0.8">
+  <g fill="#ff2bd6" opacity="0.7">
     <circle cx="860" cy="320" r="2"/><circle cx="900" cy="280" r="1.6"/>
     <circle cx="950" cy="250" r="2.2"/><circle cx="1010" cy="300" r="1.5"/>
+  </g>
+  <g fill="#00f5ff" opacity="0.7">
     <circle cx="1060" cy="260" r="1.8"/><circle cx="1100" cy="310" r="1.4"/>
     <circle cx="1160" cy="270" r="2"/><circle cx="1190" cy="320" r="1.5"/>
   </g>
@@ -56,6 +66,6 @@
   <!-- title block -->
   <text x="90" y="185" font-family="Verdana, 'DejaVu Sans', sans-serif" font-size="104" font-weight="bold" letter-spacing="2" fill="url(#title)">ForgeOS</text>
   <rect x="92" y="208" width="120" height="4" fill="url(#rule)"/>
-  <text x="92" y="252" font-family="Verdana, 'DejaVu Sans', sans-serif" font-size="30" fill="#c7d0e4" letter-spacing="1">The AI Marketing Operating System</text>
-  <text x="92" y="300" font-family="Verdana, 'DejaVu Sans', sans-serif" font-size="15" fill="#7c86a0" letter-spacing="3">OPEN SOURCE &#183; AI-POWERED &#183; MARKETING AUTOMATION &#183; MIT LICENSE</text>
+  <text x="92" y="252" font-family="Verdana, 'DejaVu Sans', sans-serif" font-size="30" fill="#c7d5e8" letter-spacing="1">The AI Marketing Operating System</text>
+  <text x="92" y="300" font-family="Verdana, 'DejaVu Sans', sans-serif" font-size="15" fill="#6b7694" letter-spacing="3">OPEN SOURCE &#183; AI-POWERED &#183; MARKETING AUTOMATION &#183; MIT LICENSE</text>
 </svg>

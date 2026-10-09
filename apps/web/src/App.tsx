@@ -18,7 +18,11 @@ import InterviewPage from "./pages/Interview";
 import BrainPage from "./pages/Brain";
 import AffiliatesPage from "./pages/Affiliates";
 import DravenPage from "./pages/Draven";
+import SwarmPage from "./pages/Swarm";
 import TemplatesPage from "./pages/Templates";
+import MarketIntelPage from "./pages/MarketIntel";
+import AlphaPage from "./pages/Alpha";
+import SettingsPage from "./pages/Settings";
 
 export default function App() {
   return (
@@ -49,7 +53,12 @@ export default function App() {
             <Route path="/interview" element={<InterviewPage />} />
             <Route path="/affiliates" element={<AffiliatesPage />} />
             <Route path="/draven" element={<DravenPage />} />
+            <Route path="/swarm" element={<SwarmPage />} />
             <Route path="/templates" element={<TemplatesPage />} />
+            <Route path="/market-intel" element={<MarketIntelPage />} />
+            <Route path="/market-intel/:id" element={<MarketIntelPage />} />
+            <Route path="/alpha" element={<AlphaPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

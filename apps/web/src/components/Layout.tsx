@@ -20,7 +20,11 @@ const NAV = [
   { to: "/onboarding", label: "Onboarding", icon: "⚙" },
   { to: "/interview", label: "Interview", icon: "❝" },
   { to: "/templates", label: "Templates", icon: "▤" },
+  { to: "/market-intel", label: "Market Intel", icon: "◈" },
+  { to: "/alpha", label: "Alpha", icon: "⚡" },
   { to: "/draven", label: "Draven", icon: "⬢" },
+  { to: "/swarm", label: "Swarm", icon: "✦" },
+  { to: "/settings", label: "Settings", icon: "🔑" },
 ] as const;
 
 /** Redirects to /login when there is no authenticated user. */

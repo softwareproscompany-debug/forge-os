@@ -1175,3 +1175,195 @@ export const integrationsApi = {
     return out;
   },
 };
+
+/* ------------------------------------------------------------------ */
+/* Travel Agency workspace (Phase 1: CRM)                               */
+/* ------------------------------------------------------------------ */
+
+export type TravelCustomerType = "individual" | "corporate";
+export type TravelLeadStatus = "new" | "qualified" | "quoted" | "booked" | "lost";
+export type TripRequestStatus =
+  | "draft"
+  | "open"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+
+export interface TravelCustomer {
+  id: string;
+  business_id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  type: TravelCustomerType;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface TravelCustomerInput {
+  name: string;
+  email?: string | null;
+  phone?: string | null;
+  type?: TravelCustomerType;
+  notes?: string | null;
+}
+
+export interface TravelerProfile {
+  id: string;
+  business_id: string;
+  customer_id: string | null;
+  full_name: string;
+  dob: string | null;
+  preferences: Record<string, unknown>;
+  loyalty: Record<string, unknown>;
+  accessibility_notes: string | null;
+  created_at: string;
+}
+
+export interface TravelerProfileInput {
+  customer_id?: string | null;
+  full_name: string;
+  dob?: string | null;
+  preferences?: Record<string, unknown>;
+  loyalty?: Record<string, unknown>;
+  accessibility_notes?: string | null;
+}
+
+export interface TravelLead {
+  id: string;
+  business_id: string;
+  customer_id: string | null;
+  source: string | null;
+  destination: string | null;
+  date_start: string | null;
+  date_end: string | null;
+  budget: string | null;
+  trip_purpose: string | null;
+  assigned_to: string | null;
+  status: TravelLeadStatus;
+  created_at: string;
+}
+
+export interface TravelLeadInput {
+  customer_id?: string | null;
+  source?: string | null;
+  destination?: string | null;
+  date_start?: string | null;
+  date_end?: string | null;
+  budget?: string | null;
+  trip_purpose?: string | null;
+  assigned_to?: string | null;
+}
+
+export interface TripRequest {
+  id: string;
+  business_id: string;
+  lead_id: string | null;
+  customer_id: string | null;
+  party_size: number;
+  origin: string | null;
+  destinations: string[];
+  date_start: string | null;
+  date_end: string | null;
+  preferences: Record<string, unknown>;
+  flexibility: string | null;
+  status: TripRequestStatus;
+  created_at: string;
+}
+
+export interface TripRequestInput {
+  lead_id?: string | null;
+  customer_id?: string | null;
+  party_size?: number;
+  origin?: string | null;
+  destinations?: string[];
+  date_start?: string | null;
+  date_end?: string | null;
+  preferences?: Record<string, unknown>;
+  flexibility?: string | null;
+  status?: TripRequestStatus;
+}
+
+export interface TravelDashboard {
+  lead_counts: Record<TravelLeadStatus, number>;
+  recent_leads: TravelLead[];
+  customer_count: number;
+  trip_request_count: number;
+}
+
+export const travelApi = {
+  dashboard(): Promise<TravelDashboard> {
+    return apiFetch<TravelDashboard>("/travel/dashboard");
+  },
+  // Customers
+  listCustomers(params?: { q?: string; type?: TravelCustomerType }): Promise<Page<TravelCustomer>> {
+    return apiFetch<unknown>("/travel/customers", { params }).then(asPage<TravelCustomer>);
+  },
+  createCustomer(data: TravelCustomerInput): Promise<TravelCustomer> {
+    return apiFetch<TravelCustomer>("/travel/customers", { method: "POST", body: data });
+  },
+  getCustomer(id: string): Promise<TravelCustomer> {
+    return apiFetch<TravelCustomer>(`/travel/customers/${id}`);
+  },
+  updateCustomer(id: string, data: Partial<TravelCustomerInput>): Promise<TravelCustomer> {
+    return apiFetch<TravelCustomer>(`/travel/customers/${id}`, { method: "PUT", body: data });
+  },
+  removeCustomer(id: string): Promise<void> {
+    return apiFetch<void>(`/travel/customers/${id}`, { method: "DELETE" });
+  },
+  listCustomerTravelers(id: string): Promise<Page<TravelerProfile>> {
+    return apiFetch<unknown>(`/travel/customers/${id}/travelers`).then(asPage<TravelerProfile>);
+  },
+  // Travelers
+  listTravelers(params?: { q?: string; customer_id?: string }): Promise<Page<TravelerProfile>> {
+    return apiFetch<unknown>("/travel/travelers", { params }).then(asPage<TravelerProfile>);
+  },
+  createTraveler(data: TravelerProfileInput): Promise<TravelerProfile> {
+    return apiFetch<TravelerProfile>("/travel/travelers", { method: "POST", body: data });
+  },
+  updateTraveler(id: string, data: Partial<TravelerProfileInput>): Promise<TravelerProfile> {
+    return apiFetch<TravelerProfile>(`/travel/travelers/${id}`, { method: "PUT", body: data });
+  },
+  removeTraveler(id: string): Promise<void> {
+    return apiFetch<void>(`/travel/travelers/${id}`, { method: "DELETE" });
+  },
+  // Leads
+  listLeads(params?: { status?: TravelLeadStatus; q?: string }): Promise<Page<TravelLead>> {
+    return apiFetch<unknown>("/travel/leads", { params }).then(asPage<TravelLead>);
+  },
+  createLead(data: TravelLeadInput): Promise<TravelLead> {
+    return apiFetch<TravelLead>("/travel/leads", { method: "POST", body: data });
+  },
+  getLead(id: string): Promise<TravelLead> {
+    return apiFetch<TravelLead>(`/travel/leads/${id}`);
+  },
+  updateLead(id: string, data: Partial<TravelLeadInput>): Promise<TravelLead> {
+    return apiFetch<TravelLead>(`/travel/leads/${id}`, { method: "PUT", body: data });
+  },
+  setLeadStatus(id: string, status: TravelLeadStatus): Promise<TravelLead> {
+    return apiFetch<TravelLead>(`/travel/leads/${id}/status`, {
+      method: "POST",
+      body: { status },
+    });
+  },
+  removeLead(id: string): Promise<void> {
+    return apiFetch<void>(`/travel/leads/${id}`, { method: "DELETE" });
+  },
+  // Trip requests
+  listTripRequests(params?: {
+    status?: TripRequestStatus;
+    lead_id?: string;
+    customer_id?: string;
+  }): Promise<Page<TripRequest>> {
+    return apiFetch<unknown>("/travel/trip-requests", { params }).then(asPage<TripRequest>);
+  },
+  createTripRequest(data: TripRequestInput): Promise<TripRequest> {
+    return apiFetch<TripRequest>("/travel/trip-requests", { method: "POST", body: data });
+  },
+  updateTripRequest(id: string, data: Partial<TripRequestInput>): Promise<TripRequest> {
+    return apiFetch<TripRequest>(`/travel/trip-requests/${id}`, { method: "PUT", body: data });
+  },
+  removeTripRequest(id: string): Promise<void> {
+    return apiFetch<void>(`/travel/trip-requests/${id}`, { method: "DELETE" });
+  },
+};

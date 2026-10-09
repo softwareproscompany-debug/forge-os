@@ -216,9 +216,9 @@ void main() {
   // carries the energy, like the reference.
   float limbW = 0.18 + 0.82 * pow(fres, 1.6);
   vec3 filCol = mix(cyan, ice, clamp(fil2 * 0.65 + knots * 0.8, 0.0, 1.0))
-              * (fil * 0.8 + fil2 * 0.5) * energy * limbW;
-  filCol += ice * knots * 0.85 * energy;
-  filCol += ice * uHigh * 0.28 * fil;
+              * (fil * 1.6 + fil2 * 1.0) * energy * limbW;
+  filCol += ice * knots * 1.7 * energy;
+  filCol += ice * uHigh * 0.55 * fil;
 
   vec3 limbCol = mix(cyan * 0.45, ice, limbFrag * 0.55)
                * limb * (0.45 + 0.75 * uGlow) * energy;
@@ -242,9 +242,9 @@ void main() {
   col += add;
 
   float alpha = clamp(
-      dot(filCol, vec3(0.333)) * 1.15
-    + dot(limbCol, vec3(0.333)) * 1.0
-    + (e1 * 0.5 + e2 * 0.38) * 0.22
+      dot(filCol, vec3(0.333)) * 2.2
+    + dot(limbCol, vec3(0.333)) * 1.6
+    + (e1 * 0.5 + e2 * 0.38) * 0.35
     + bodyA,
     0.0, 1.0);
 
@@ -307,11 +307,11 @@ void main() {
   float w = fbm(q * 1.4 + vec3(0.0, -uTime * (0.22 + 0.25 * uFlame) * uTurb, uTime * 0.05 * uTurb));
   float s = fbm(q + 1.8 * w + vec3(0.0, -uTime * rise * uTurb, 0.0));
   float ridge = 1.0 - abs(2.0 * s - 1.0);
-  float wisps = pow(smoothstep(0.40, 0.95, ridge), 5.0);
+  float wisps = pow(smoothstep(0.58, 0.95, ridge), 5.0);
   // Fine strands nested inside the wisps.
   float s2 = fbm(q * 2.1 + 1.2 * w + vec3(2.0, -uTime * rise * 1.4 * uTurb, 1.0));
   float ridge2 = 1.0 - abs(2.0 * s2 - 1.0);
-  float strands = pow(smoothstep(0.45, 1.0, ridge2), 7.0);
+  float strands = pow(smoothstep(0.62, 1.0, ridge2), 7.0);
 
   float a = (wisps * 0.8 + strands * 0.55) * uAlpha * (0.30 + 0.70 * facing) * (0.65 + 0.65 * uLevel);
   vec3 col = mix(uPalSmokeA, uPalSmokeB, clamp(wisps + strands * 0.5, 0.0, 1.0));
@@ -372,7 +372,7 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
   float dist = max(0.4, -mv.z);
-  gl_PointSize = aSeed.w * uPixelRatio * 26.0 / dist;
+  gl_PointSize = aSeed.w * uPixelRatio * 9.0 / dist;
   vTwinkle = 0.55 + 0.45 * sin(uTime * (1.5 + aSeed.z * 2.0) + aSeed.y * 9.0);
 }
 `;
@@ -680,7 +680,7 @@ export function JarvisOrb(props: JarvisOrbProps) {
       uTime: { value: 0 },
       uEnergy: { value: 0.3 },
       uPixelRatio: { value: pixelRatio },
-      uAlpha: { value: 0.85 },
+      uAlpha: { value: 0.45 },
       uTint: { value: v3(pal.particle) },
       uRise: { value: pal.flame },
     };

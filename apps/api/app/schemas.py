@@ -213,6 +213,9 @@ class AssetGenerateRequest(BaseModel):
     template_id: uuid.UUID | None = None
     prompt: str | None = None
     variables: dict[str, Any] = Field(default_factory=dict)
+    # Marks the asset as affiliate content so the FTC disclosure guardrail
+    # applies (also auto-detected from /r/ links or program URLs).
+    is_affiliate_content: bool = False
 
 
 class AssetGenerateResponse(BaseModel):
@@ -240,11 +243,18 @@ class AssetOut(ORMModel):
     tokens_out: int
     llm_provider: str | None
     llm_model: str | None
+    is_affiliate_content: bool
     created_at: datetime
 
 
 class AssetApprovalRequest(BaseModel):
     note: str | None = None
+
+
+class AssetUpdateRequest(BaseModel):
+    """Partial update for asset metadata (not the approval state machine)."""
+
+    is_affiliate_content: bool | None = None
 
 
 class AssetRejectRequest(BaseModel):
@@ -602,3 +612,125 @@ class InterviewConfirmRequest(BaseModel):
 
 class InterviewConfirmResponse(BaseModel):
     brand_kit: BrandKitOut
+
+
+# ---------------------------------------------------------------------------
+# Affiliates — "we promote affiliate offers, we earn commissions"
+# ---------------------------------------------------------------------------
+
+
+class AffiliateProgramBase(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    network: str = Field(default="other", max_length=64)
+    website_url: str | None = Field(default=None, max_length=1024)
+    default_commission_pct: Decimal = Field(default=Decimal("0"), ge=0, le=100)
+    cookie_days: int | None = Field(default=None, ge=0, le=3650)
+    status: str = Field(default="active", max_length=32)
+    notes: str | None = None
+
+
+class AffiliateProgramCreate(AffiliateProgramBase):
+    pass
+
+
+class AffiliateProgramUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    network: str | None = Field(default=None, max_length=64)
+    website_url: str | None = Field(default=None, max_length=1024)
+    default_commission_pct: Decimal | None = Field(default=None, ge=0, le=100)
+    cookie_days: int | None = Field(default=None, ge=0, le=3650)
+    status: str | None = Field(default=None, max_length=32)
+    notes: str | None = None
+
+
+class AffiliateProgramOut(AffiliateProgramBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class AffiliateLinkBase(BaseModel):
+    program_id: uuid.UUID
+    label: str = Field(min_length=1, max_length=255)
+    slug: str = Field(min_length=1, max_length=128, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    destination_url: str = Field(min_length=1, max_length=2048)
+    utm_source: str | None = Field(default=None, max_length=128)
+    utm_medium: str | None = Field(default=None, max_length=128)
+    utm_campaign: str | None = Field(default=None, max_length=128)
+    is_active: bool = True
+
+
+class AffiliateLinkCreate(AffiliateLinkBase):
+    pass
+
+
+class AffiliateLinkUpdate(BaseModel):
+    program_id: uuid.UUID | None = None
+    label: str | None = Field(default=None, min_length=1, max_length=255)
+    slug: str | None = Field(
+        default=None, min_length=1, max_length=128,
+        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    )
+    destination_url: str | None = Field(default=None, min_length=1, max_length=2048)
+    utm_source: str | None = Field(default=None, max_length=128)
+    utm_medium: str | None = Field(default=None, max_length=128)
+    utm_campaign: str | None = Field(default=None, max_length=128)
+    is_active: bool | None = None
+
+
+class AffiliateLinkOut(AffiliateLinkBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class AffiliateLinkStats(BaseModel):
+    link_id: uuid.UUID
+    label: str
+    program_name: str
+    clicks: int
+    conversions: int
+    conversion_rate: float
+    earnings_usd: float
+
+
+class AffiliateProgramStats(BaseModel):
+    program_id: uuid.UUID
+    program_name: str
+    clicks: int
+    conversions: int
+    conversion_rate: float
+    earnings_usd: float
+
+
+class AffiliateTotals(BaseModel):
+    clicks: int
+    conversions: int
+    conversion_rate: float
+    earnings_usd: float
+
+
+class AffiliateEarningsResponse(BaseModel):
+    days: int
+    totals: AffiliateTotals
+    per_program: list[AffiliateProgramStats]
+    per_link: list[AffiliateLinkStats]
+
+
+class AffiliateConversionRequest(BaseModel):
+    """Network postback stand-in: record a conversion for a link.
+
+    ``commission_usd`` defaults to ``order_value_usd`` × the program's
+    ``default_commission_pct`` / 100 when omitted.
+    """
+
+    link_slug: str = Field(min_length=1, max_length=128)
+    order_value_usd: Decimal = Field(gt=0, le=10000000)
+    commission_usd: Decimal | None = Field(default=None, ge=0, le=10000000)
+
+
+class AffiliateConversionResponse(BaseModel):
+    event_id: uuid.UUID
+    link_id: uuid.UUID
+    program_id: uuid.UUID
+    commission_usd: float

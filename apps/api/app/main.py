@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.routers import (
+    affiliates,
     analytics,
     assets,
     auth,
@@ -62,8 +63,13 @@ def create_app() -> FastAPI:
         webhooks.router,
         events.router,
         interview.router,
+        affiliates.router,
     ):
         app.include_router(router, prefix=prefix)
+
+    # Public affiliate short-link redirect — deliberately outside /api/v1
+    # and without auth (see routers/affiliates.py).
+    app.include_router(affiliates.redirect_router)
 
     return app
 

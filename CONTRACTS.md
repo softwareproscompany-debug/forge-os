@@ -99,6 +99,7 @@ generation job leaves it in `in_review` and a human approves via the approvals i
 - `GET /analytics/campaigns/{id}/funnel` -> per-step {step_id, position, sent, opened, clicked}
 - `GET /analytics/weekly-summary` -> latest `weekly_summaries` row for the caller's business by `week_start` desc ({week_start, top_assets, bottom_assets, best_channel_per_segment, recommendation, created_at}); 404 {detail: "no weekly summary yet"} when the worker has not cut one yet
 - `GET /ops/activity?limit=30` -> {as_of, stages: {foundation, origination, reach, growth, evidence} (each a {metric: count} map), counters: {sends_today, generations_today, in_flight}, activity: [{id, kind: generation|send|event, title, detail?, status?, at}]} — read-only mission-control aggregate; `as_of` is the data timestamp every panel shows
+- `GET /ops/brain` -> {as_of, layers: [{key, label, count, nodes: [{id, label, detail?, at?}]}], links: [{source, target, kind: brand|asset|campaign|engagement}], timeline: [{at, kind: sent|opened|clicked|converted|event, label}]} — read-only knowledge graph (brand kits -> assets -> campaigns -> sends -> events, tenant-scoped, node lists capped at 60/layer, links at 300, timeline = last 30d capped at 240); one JSON feeds all four `/brain` views
 - `GET /dev/outbox?limit=50`
 - `POST /webhooks/delivery` {provider_message_id, event: delivered|opened|clicked|bounced, contact?} — no auth (shared secret header `X-Webhook-Secret` = env WEBHOOK_SECRET)
 - `POST /events` {kind, contact_id?, payload?} — enqueue event-trigger processing
@@ -180,6 +181,6 @@ Pin versions in requirements.txt.
 
 ## Frontend routes
 
-`/` dashboard · `/ops` mission control · `/onboarding` · `/campaigns` · `/campaigns/:id` · `/calendar`
-· `/approvals` · `/assets` · `/analytics` · `/outbox`
+`/` dashboard · `/ops` mission control · `/brain` knowledge graph · `/onboarding` · `/campaigns` · `/campaigns/:id` · `/calendar`
+· `/approvals` · `/assets` · `/analytics` · `/outbox` · `/interview` · `/autopilot`
 Auth: JWT in localStorage, `Authorization: Bearer`. API client in `src/lib/api.ts`.

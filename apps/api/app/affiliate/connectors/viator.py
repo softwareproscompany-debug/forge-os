@@ -152,6 +152,51 @@ class ViatorConnector:
         products = body.get("products") or []
         return [normalize_product(p) for p in products if p.get("productCode")]
 
+    async def freetext_search(
+        self,
+        keyword: str,
+        count: int = 25,
+        currency: str = "USD",
+    ) -> list[dict[str, Any]]:
+        """Freetext product search (no destination ID needed).
+
+        Falls back for destinations not in the affiliate's coverage
+        (e.g. Japan). Returns normalized product dicts.
+        """
+        kw = (keyword or "").strip()
+        if not kw:
+            raise ViatorError("keyword is required for freetext search")
+        count = max(1, min(int(count), _MAX_COUNT))
+        payload = {
+            "searchTerm": kw,
+            "searchTypes": [
+                {"searchType": "PRODUCTS", "pagination": {"start": 1, "count": count}}
+            ],
+            "currency": currency,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.post(
+                    API_BASE + "/search/freetext",
+                    headers=_headers(self._api_key),
+                    json=payload,
+                )
+        except httpx.HTTPError as exc:
+            raise ViatorError(f"Viator freetext search request failed: {exc}") from exc
+        if resp.status_code in (401, 403):
+            raise ViatorAuthError(
+                "Viator rejected the API key (HTTP "
+                f"{resp.status_code}). Check Settings → Affiliates."
+            )
+        if resp.status_code >= 400:
+            raise ViatorError(f"Viator freetext search HTTP {resp.status_code}")
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise ViatorError("Viator returned non-JSON response") from exc
+        products = body.get("products") or []
+        return [normalize_product(p) for p in products if p.get("productCode")]
+
     async def get_product(self, product_code: str) -> dict[str, Any]:
         """Full detail for one product code (affiliate productUrl included)."""
         code = (product_code or "").strip()

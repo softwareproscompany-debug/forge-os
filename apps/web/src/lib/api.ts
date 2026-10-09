@@ -596,3 +596,39 @@ export const outboxApi = {
     );
   },
 };
+
+/* ------------------------------------------------------------------ */
+/* Ops / mission control (read-only aggregate)                         */
+/* ------------------------------------------------------------------ */
+
+export type OpsActivityKind = "generation" | "send" | "event";
+
+export interface OpsActivityItem {
+  id: string;
+  kind: OpsActivityKind;
+  title: string;
+  detail: string | null;
+  status: string | null;
+  at: string;
+}
+
+export interface OpsCounters {
+  sends_today: number;
+  generations_today: number;
+  in_flight: number;
+}
+
+export interface OpsActivityResponse {
+  as_of: string;
+  stages: Record<string, Record<string, number>>;
+  counters: OpsCounters;
+  activity: OpsActivityItem[];
+}
+
+export const opsApi = {
+  activity(limit = 30): Promise<OpsActivityResponse> {
+    return apiFetch<OpsActivityResponse>("/ops/activity", {
+      params: { limit },
+    });
+  },
+};

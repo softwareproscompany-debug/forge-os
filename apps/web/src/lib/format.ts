@@ -82,3 +82,18 @@ export function linesToList(text: string): string[] {
 export function listToLines(list: string[] | null | undefined): string {
   return (list ?? []).join("\n");
 }
+
+/** Compact relative time ("12s", "3m", "2h", "5d") for live feeds. */
+export function timeAgo(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "—";
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (secs < 5) return "now";
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}

@@ -230,7 +230,7 @@ export default function MeetingsPage() {
               placeholder="Q4 planning call"
             />
           </Field>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div className="form-grid-2">
             <Field label="Starts">
               <input
                 className="input"

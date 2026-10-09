@@ -241,7 +241,22 @@ code {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.sidebar-scroll {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.nav-section-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  padding: 14px 12px 6px;
+  font-weight: 600;
 }
 
 .nav-link {
@@ -863,6 +878,40 @@ input[type="checkbox"] {
 .modal-body {
   padding: 20px;
   overflow-y: auto;
+}
+
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+/* Mobile modal sizing: full-width sheet, stacked fields */
+@media (max-width: 640px) {
+  .form-grid-2 {
+    grid-template-columns: 1fr;
+  }  .modal-backdrop {
+    padding: 12px;
+    align-items: flex-end;
+  }
+  .modal {
+    max-width: 100%;
+    max-height: 92vh;
+    border-radius: 16px 16px 0 0;
+  }
+  .modal-body {
+    padding: 16px;
+  }
+  .modal-header {
+    padding: 14px 16px;
+  }
+  /* Stack side-by-side form rows on mobile */
+  .form-row {
+    flex-direction: column;
+  }
+  .form-row > * {
+    width: 100%;
+  }
 }
 
 .queued-state {

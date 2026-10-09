@@ -117,6 +117,7 @@ export function Layout() {
           <div className="brand-mark">F</div>
           <div className="brand-name">ForgeOS</div>
         </div>
+        <div className="sidebar-scroll">
         <nav className="nav" aria-label="Primary">
           {NAV.map((item) => (
             <NavLink
@@ -161,6 +162,7 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
+        </div>
         <div className="sidebar-foot">
           <button type="button" className="btn btn-ghost" onClick={handleLogout}>
             Sign out

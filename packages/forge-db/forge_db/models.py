@@ -1536,3 +1536,206 @@ class LeadSource(Base):
     __table_args__ = (
         sa.UniqueConstraint("business_id", "source", name="uq_lead_source_biz_src"),
     )
+
+
+class Opportunity(Base):
+    """OS Pipeline: a deal moving through stages.
+
+    Stages are plain strings (``new`` | ``qualified`` | ``proposal`` |
+    ``negotiation`` | ``closed`` | ``lost``), validated at the API layer —
+    deliberately not a Postgres enum so stages stay easy to extend.
+    ``value_cents`` is the deal size in minor currency units.
+    """
+
+    __tablename__ = "opportunities"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    contact_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("contacts.id", ondelete="SET NULL"), nullable=True
+    )
+    value_cents: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="new")
+    probability: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=50)
+    expected_close_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    notes: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class Meeting(Base):
+    """OS Meetings: scheduled business meetings with attendees and notes."""
+
+    __tablename__ = "meetings"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attendees: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    notes: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class KnowledgeDoc(Base):
+    """OS Knowledge: business context documents the AI can draw on.
+
+    Plain text store for now (company facts, FAQs, policies, product
+    notes). Wiring into Draven's prompt context is a later step.
+    """
+
+    __tablename__ = "knowledge_docs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    content: Mapped[str] = mapped_column(sa.Text, nullable=False, default="")
+    source: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+
+# ---------------------------------------------------------------------------
+# Growth Engine (P1 foundation): INBOUND partner management.
+#
+# Orientation: partners promote OUR products and we pay THEM commissions.
+# This is the inverse of the outbound affiliate module (affiliate_programs /
+# affiliate_links: we promote third-party offers, we earn). Do NOT reuse
+# those tables for inbound partners.
+#
+# Partners are NEVER ``users`` rows — external identity lives in
+# ``partner_users`` with partner-scoped JWTs (see app/core/partner_deps.py).
+# ---------------------------------------------------------------------------
+
+
+class PartnerTier(Base):
+    """Named commission/recognition tier a partner can belong to."""
+
+    __tablename__ = "partner_tiers"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class Partner(Base):
+    """An inbound partner: customer referrer, affiliate, agency, strategic.
+
+    ``type`` / ``status`` are plain strings (validated at the API layer),
+    deliberately not Postgres enums so they stay easy to extend.
+    ``referral_code`` is unique per business and backs the partner's
+    referral link (the /p/{code} redirect lands in P2).
+    """
+
+    __tablename__ = "partners"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    tier_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("partner_tiers.id", ondelete="SET NULL"), nullable=True
+    )
+    referral_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+    tier: Mapped[Optional["PartnerTier"]] = relationship()
+
+
+class PartnerUser(Base):
+    """External identity for partner portal logins. NOT a ``users`` row.
+
+    A partner portal account must never see business internals; the
+    partner-scoped JWT (partner_deps) only carries partner_id + business_id.
+    ``partner_id`` is nullable so an account can exist before approval
+    links it to a partner row.
+    """
+
+    __tablename__ = "partner_users"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    partner_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("partners.id", ondelete="SET NULL"), nullable=True
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    partner: Mapped[Optional["Partner"]] = relationship()
+
+
+class PartnerApplication(Base):
+    """Inbound application to become a partner; reviewed by owner/admin."""
+
+    __tablename__ = "partner_applications"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    partner_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("partners.id", ondelete="SET NULL"), nullable=True
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    form_data: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    reviewed_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class StripeOrderEvent(Base):
+    """Raw Stripe webhook events: the order source of truth (P1 ingest).
+
+    Append-only. ``stripe_event_id`` is unique per business so retried
+    deliveries never double-store. Commission computation (P3) reads from
+    here — it never trusts self-reported values.
+    """
+
+    __tablename__ = "stripe_order_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    stripe_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "business_id", "stripe_event_id", name="uq_stripe_order_events_biz_event"
+        ),
+    )
+
+
+class ComplianceIssue(Base):  # noqa: F811 — distinct from app.compliance.checker.ComplianceIssue
+    """A compliance flag raised by the checker or the daily compliance bot.
+
+    Bots never auto-delete or auto-edit — they flag for human review only.
+    ``status``: open | acknowledged | resolved | dismissed.
+    ``source``: "api_check" (user-initiated) | "bot_scan" (daily job).
+    """
+
+    __tablename__ = "compliance_issues"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="api_check")
+    pack_id: Mapped[str] = mapped_column(String(64), nullable=False, default="ftc_baseline")
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False, default="social_post")
+    # What was scanned: "asset" | "campaign" | "ad_hoc"
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False, default="ad_hoc")
+    subject_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID, nullable=True)
+    subject_title: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")
+    violations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
+    created_at: Mapped[datetime] = _created_at()

@@ -59,7 +59,12 @@ businesses/users/global. All queries filter by the JWT's business_id.
 - `send_status`: queued | sending | sent | delivered | bounced | failed
 - `sends(id, business_id, campaign_id nullable FK, step_id nullable FK campaign_steps, contact_id FK contacts, channel, asset_id nullable FK assets, to_address text, subject nullable, body text, status, provider_message_id nullable, error nullable, scheduled_for nullable, sent_at nullable, opened_at nullable, clicked_at nullable, converted_at nullable, meta jsonb default {})`
 - `events(id, business_id, contact_id nullable FK, kind text, payload jsonb default {})`
-  - kinds: `contact_added | email_opened | email_clicked | sms_replied | converted`
+  - kinds: `contact_added | email_opened | email_clicked | sms_replied | converted | affiliate_clicked | affiliate_converted`
+  - affiliate event payloads: `affiliate_clicked` carries `{link_id, program_id}` (contact_id null — anonymous); `affiliate_converted` carries `{link_id, program_id, order_value_usd, commission_usd}`
+- `assets(..., is_affiliate_content bool default false)` — marks affiliate-promoting copy; the FTC disclosure guardrail applies (also auto-detected from `/r/` short links or program URLs)
+- `affiliate_programs(id, business_id, name, network text default 'other' (amazon|shareasale|cj|impact|direct|other), website_url nullable, default_commission_pct numeric(6,3) default 0, cookie_days nullable int, status in (active,paused) default active, notes nullable text)` — third-party programs whose offers the business promotes
+- `affiliate_links(id, business_id, program_id FK affiliate_programs cascade, label, slug (unique per business), destination_url (affiliate ID/tag already embedded), utm_source default 'forgeos', utm_medium default 'affiliate', utm_campaign nullable, is_active bool default true)` — served publicly at `GET /r/{slug}` (302, records `affiliate_clicked`)
+- `weekly_summaries(..., affiliate_top_links jsonb default [] ([{link_id, label, program_name, clicks, conversions, conversion_rate, earnings_usd}], min 5 clicks, top 3 by rate), affiliate_earnings_usd numeric(12,4) default 0)` — weekly affiliate evidence
 - `autopilot_settings(business_id PK FK, auto_approve bool default false, require_approval_for_channels jsonb default [], daily_send_cap int default 500, quiet_hours_start int default 22, quiet_hours_end int default 8)`
 - `generation_logs(id, business_id, asset_id FK, provider, model, prompt_hash, tokens_in, tokens_out, cost_usd numeric, latency_ms int)`
 - `dev_outbox(id, business_id, channel, to_address, subject nullable, body text, provider text default 'stub', created_at)` — written by stub channel providers only.
@@ -85,8 +90,8 @@ generation job leaves it in `in_review` and a human approves via the approvals i
 - `GET/POST /brand-kits`, `GET/PUT /brand-kits/{id}`
 - `GET/POST /contacts`, `GET/PUT/DELETE /contacts/{id}`, `POST /contacts/{id}/consent` {channel: email|sms, granted: bool}
 - `GET/POST /templates`, `GET/PUT/DELETE /templates/{id}`, `POST /templates/{id}/preview` {variables} -> {subject, body}
-- `POST /assets/generate` {kind, title, template_id?, prompt?, variables?} -> {asset_id, job_id} (enqueues worker job)
-- `GET /assets?status=&kind=`, `GET /assets/{id}`, `POST /assets/{id}/submit`, `POST /assets/{id}/approve` {note?}, `POST /assets/{id}/reject` {reason}, `GET /assets/{id}/versions`
+- `POST /assets/generate` {kind, title, template_id?, prompt?, variables?, is_affiliate_content?} -> {asset_id, job_id} (enqueues worker job)
+- `GET /assets?status=&kind=`, `GET /assets/{id}`, `PATCH /assets/{id}` {is_affiliate_content?} (metadata only — status changes still go through submit/approve/reject), `POST /assets/{id}/submit`, `POST /assets/{id}/approve` {note?}, `POST /assets/{id}/reject` {reason}, `GET /assets/{id}/versions`
 - `GET/POST /campaigns`, `GET/PUT /campaigns/{id}`, `POST /campaigns/{id}/steps` {steps:[...]}, `PUT /campaigns/{id}/steps/{step_id}`, `POST /campaigns/{id}/launch`, `POST /campaigns/{id}/pause`, `GET /campaigns/{id}/enrollments`
 - `GET/PUT /autopilot`
 - `GET /autopilot/plan` -> latest `content_plans` row for the caller's business by `week_start` desc ({week_start, status, items, created_at, campaign_id}); 404 when the planner has not drafted one yet
@@ -101,6 +106,25 @@ generation job leaves it in `in_review` and a human approves via the approvals i
 - `GET /ops/activity?limit=30` -> {as_of, stages: {foundation, origination, reach, growth, evidence} (each a {metric: count} map), counters: {sends_today, generations_today, in_flight}, activity: [{id, kind: generation|send|event, title, detail?, status?, at}]} — read-only mission-control aggregate; `as_of` is the data timestamp every panel shows
 - `GET /ops/brain` -> {as_of, layers: [{key, label, count, nodes: [{id, label, detail?, at?}]}], links: [{source, target, kind: brand|asset|campaign|engagement}], timeline: [{at, kind: sent|opened|clicked|converted|event, label}]} — read-only knowledge graph (brand kits -> assets -> campaigns -> sends -> events, tenant-scoped, node lists capped at 60/layer, links at 300, timeline = last 30d capped at 240); one JSON feeds all four `/brain` views
 - `GET /dev/outbox?limit=50`
+- `GET/POST /affiliates/programs`, `GET/PATCH/DELETE /affiliates/programs/{id}` — affiliate programs (status must be `active|paused`; DELETE cascades to links)
+- `GET/POST /affiliates/links` (`?program_id=` filter), `GET/PATCH/DELETE /affiliates/links/{id}` — trackable links; slug must match `^[a-z0-9]+(-[a-z0-9]+)*$` (unique per business, 409 on conflict); destination_url must be absolute http(s); utm_source/utm_medium default to `forgeos`/`affiliate`
+- `GET /affiliates/earnings?days=30` -> {days, totals: {clicks, conversions, conversion_rate, earnings_usd}, per_program: [...], per_link: [...]} — aggregated honestly from stored affiliate events only
+- `POST /affiliates/conversions` {link_slug, order_value_usd, commission_usd?} -> {event_id, link_id, program_id, commission_usd} (201) — network postback stand-in; commission defaults to order_value × program.default_commission_pct / 100; 404 on unknown slug
+- `GET /r/{slug}` — PUBLIC (no auth, not under /api/v1): records one anonymous `affiliate_clicked` event and 302s to destination_url + UTM params (merchant query params preserved, never overridden); unknown slug, inactive link, or paused program -> plain 404 (no business internals leak)
+
+**Postback pattern (affiliate conversions).** The conversion ingest endpoint doubles as the network postback URL. Networks that support server-side postbacks can be pointed at:
+
+```
+POST https://<api-host>/api/v1/affiliates/conversions
+Authorization: Bearer <forgeos-api-token>
+Content-Type: application/json
+
+{"link_slug": "<slug>", "order_value_usd": "129.99", "commission_usd": "5.20"}
+```
+
+`commission_usd` is optional — when omitted the server computes it from the program's `default_commission_pct`. Networks that only do pixel/redirect postbacks map to the same call server-side.
+
+**FTC disclosure guardrail (affiliate content).** Assets flagged `is_affiliate_content` (set via API or auto-detected from `/r/` short links / program domains) must carry an affiliate disclosure. `check_guardrails()` flags a missing disclosure (case-insensitive match on: "affiliate link", "affiliate disclosure", "we may earn a commission", "as an amazon associate"); the worker's `generate_asset` auto-appends `AFFILIATE_DISCLOSURE` ("Disclosure: this content contains affiliate links. If you buy through them, we may earn a commission at no extra cost to you.") to the body and records a note in the guardrail-violations list, mirroring the email-unsubscribe pattern. `has_affiliate_disclosure()`, `looks_like_affiliate_content()`, and idempotent `ensure_affiliate_disclosure()` are exported from `forge_llm`.
 - `POST /webhooks/delivery` {provider_message_id, event: delivered|opened|clicked|bounced, contact?} — no auth (shared secret header `X-Webhook-Secret` = env WEBHOOK_SECRET)
 - `POST /events` {kind, contact_id?, payload?} — enqueue event-trigger processing
 
@@ -112,7 +136,7 @@ Errors: JSON `{detail: ...}`, standard HTTP codes. Pagination: `?limit=&offset=`
 - `send_message(ctx, send_id: str)` — load send+contact; consent check (email needs consent_email, sms needs consent_sms, unsubscribed blocks all); pick provider via `forge_channels`; retry with backoff on transient errors (arq retry); mark sent/failed; stub provider writes to dev_outbox.
 - `campaign_tick(ctx)` — runs every 60s (arq cron): for running campaigns, enroll due contacts (starts_at passed, trigger contact_added), advance enrollments whose next_run_at <= now: create `sends` row (queued) + enqueue `send_message`; compute next_run_at from step delay_hours; respect quiet hours + daily_send_cap from autopilot_settings.
 - `handle_event(ctx, event_id: str)` — `contact_added` -> enroll contact in campaigns whose step 0 has trigger_event='contact_added'; other events update send rows (opened/clicked) via provider_message_id lookup.
-- `weekly_summary(ctx)` — Card 5. Hourly cron (self-gated): per business, convert now to the business timezone (stdlib `zoneinfo`, UTC fallback); if local Sunday 23:xx and no `weekly_summaries` row exists for (business_id, week_start=<last Monday>), aggregate the last 7 days `[now-7d, now)` into `top_assets`/`bottom_assets` (top/bottom 3 by conversion rate, delivered>=1, tiebreak rate then asset id), `best_channel_per_segment` (best channel per contact-tag segment, `untagged` included; tiebreak rate -> delivered desc -> channel name), and a `recommendation` paragraph (deterministic template on stub; one LLM call on live providers, stub fallback). Commits per business. Also feeds Origination: `generate_asset` appends the latest summary's recommendation to the prompt as "Last week's evidence".
+- `weekly_summary(ctx)` — Card 5. Hourly cron (self-gated): per business, convert now to the business timezone (stdlib `zoneinfo`, UTC fallback); if local Sunday 23:xx and no `weekly_summaries` row exists for (business_id, week_start=<last Monday>), aggregate the last 7 days `[now-7d, now)` into `top_assets`/`bottom_assets` (top/bottom 3 by conversion rate, delivered>=1, tiebreak rate then asset id), `best_channel_per_segment` (best channel per contact-tag segment, `untagged` included; tiebreak rate -> delivered desc -> channel name), plus affiliate evidence: `affiliate_top_links` (top 3 links by conversion rate, min 5 clicks) and `affiliate_earnings_usd` (sum of `affiliate_converted` commissions), and a `recommendation` paragraph (deterministic template on stub; one LLM call on live providers, stub fallback). Commits per business. Also feeds Origination: `generate_asset` appends the latest summary's recommendation to the prompt as "Last week's evidence", plus a line naming the top affiliate offer ("Top affiliate offer: <label> converted at <rate> — feature it again"), and auto-appends the FTC disclosure to affiliate content missing one.
 - `autopilot_plan(ctx)` — Card 4. Hourly cron (self-gated): per business, if local Monday 06:xx and no draft/approved `content_plans` row exists for (business_id, week_start=<that Monday>), draft 3 items (Tue email_copy, Thu social_post, Sat sms) from the brand kit + latest weekly summary + approved-asset pool (email reuses the summary's top asset when kind matches, re-validated); stub is deterministic, live LLM may generate items JSON with stub fallback. Commits per business.
 
 Cron note: `weekly_summary` and `autopilot_plan` are registered as `cron(job, hour={*range(24)}, minute={0})` — an hourly wake with per-business timezone gating inside the job, because a single daily cron cannot honor per-business timezones. `minute={0}` is load-bearing: arq treats an omitted `minute` as a wildcard (schedules every minute).
@@ -131,7 +155,11 @@ def get_provider() -> LLMProvider  # LLM_PROVIDER env: stub | anthropic | openai
 # anthropic: ANTHROPIC_API_KEY, ANTHROPIC_MODEL (default claude-sonnet-4-5-20250929)
 # openai_compatible: OPENAI_COMPAT_BASE_URL, OPENAI_COMPAT_API_KEY, OPENAI_COMPAT_MODEL
 def build_brand_system_prompt(brand: dict) -> str   # voice, tone_tags, icp, do/don't lists
-def check_guardrails(text: str, brand: dict) -> list[str]  # returns violation strings
+def check_guardrails(text: str, brand: dict) -> list[str]  # returns violation strings; also flags missing affiliate disclosure when brand["is_affiliate_content"] is truthy
+AFFILIATE_DISCLOSURE: str  # exact FTC disclosure appended to affiliate content
+def has_affiliate_disclosure(text: str) -> bool   # case-insensitive phrase match
+def looks_like_affiliate_content(text: str) -> bool  # /r/ short-link or program-domain heuristic
+def ensure_affiliate_disclosure(text: str) -> tuple[str, bool]  # (body, appended?) idempotent
 class PromptRegistry:
     def register(self, name: str, template: str, defaults: dict | None = None): ...
     def render(self, name: str, variables: dict) -> str: ...
@@ -182,5 +210,5 @@ Pin versions in requirements.txt.
 ## Frontend routes
 
 `/` dashboard · `/ops` mission control · `/brain` knowledge graph · `/onboarding` · `/campaigns` · `/campaigns/:id` · `/calendar`
-· `/approvals` · `/assets` · `/analytics` · `/outbox` · `/interview` · `/autopilot`
-Auth: JWT in localStorage, `Authorization: Bearer`. API client in `src/lib/api.ts`.
+· `/approvals` · `/assets` · `/analytics` · `/outbox` · `/interview` · `/autopilot` · `/affiliates` (earnings cards, programs + links tables, CRUD modals, copy short-link)
+Auth: JWT in localStorage, `Authorization: Bearer`. API client in `src/lib/api.ts`. (`/r/{slug}` is a public API redirect, not a frontend route.)

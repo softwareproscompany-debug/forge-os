@@ -11,7 +11,7 @@
 
 **`routers/draven.py`** — the `/draven` API surface:
 - `POST /draven/chat` — `{message, history}` → `{reply, tools_used[], approvals_needed[], estimated_cost_usd, provider}`. A real keyword intent router (approval-status, campaign-status, analytics, contacts, autopilot) maps messages to typed tools, executes them tenant-scoped, and returns human-readable replies. Every run is audit-logged. Unknown intent → no-op tools, safe fallback text. Per-request timeout + max message length.
-- `GET /draven/tools` — the typed tool registry (**67 tools**): the original 9 (`draven.business_summary`, `draven.approvals_pending`, `draven.assets_pending_review`, `draven.campaigns_status`, `draven.analytics_summary`, `draven.contacts_search`, `draven.autopilot_status`, `draven.campaign_pause`, `draven.asset_approve`), 3 market-intel tools, 5 alpha workflow tools, and 50 voice-parity tools covering every app capability (see "Voice parity" below). Medium/high-risk tools are **approval-gated** — they return a structured approval request and never execute.
+- `GET /draven/tools` — the typed tool registry (**68 tools**): the original 9 (`draven.business_summary`, `draven.approvals_pending`, `draven.assets_pending_review`, `draven.campaigns_status`, `draven.analytics_summary`, `draven.contacts_search`, `draven.autopilot_status`, `draven.campaign_pause`, `draven.asset_approve`), 3 market-intel tools, 5 alpha workflow tools, and 51 voice-parity tools covering every app capability (see "Voice parity" below). High-risk *destructive/irreversible* tools (`campaign_pause`, `asset_approve`, `campaign_launch`, deletes) are **approval-gated** — they return a structured approval request and never execute. Medium/high *constructive* tools (`campaign_create`, `campaign_steps_add`, `campaign_enroll`) execute immediately but are draft-safe: campaigns are created as drafts and nothing sends until a human approves the launch.
 - `GET /draven/provider` / `PUT /draven/provider` (admin) / `POST /draven/provider/test` (admin) — chat LLM provider config: `stub` | `anthropic` | `openai-compatible`. Keys Fernet-encrypted at rest (`DRAVEN_CONFIG_KEY`), fail-closed 400 when missing. Secrets never returned in any response or log.
 - `GET /draven/audit?limit` — the tool-run audit log (execution timeline source).
 - `POST /draven/stop` — sets the session stop flag the frontend checks between messages (best-effort; real in-flight cancellation is out of scope for the stub provider).
@@ -47,7 +47,7 @@
 
 ### Verified live (sprite, 2026-10-09)
 - Migrations applied (`0003_affiliates → 0004_draven → 0005_draven_tts`).
-- `GET /draven/tools` → 67 tools. `POST /draven/chat` (intent "what needs my approval?") → executed `draven.approvals_pending`, returned real backend state, wrote audit row.
+- `GET /draven/tools` → 68 tools. `POST /draven/chat` (intent "what needs my approval?") → executed `draven.approvals_pending`, returned real backend state, wrote audit row.
 - New frontend bundle serving; `/draven/tools` responds through the public URL.
 
 ## Deliberate limitations (documented in code, not hidden)
@@ -139,7 +139,7 @@ tool output from real data.
 | Contacts | `contacts_list`, `contact_get`, `contact_create`, `contact_update`, `contact_consent` (low); `contact_delete` (**high**) |
 | Templates | `template_list`, `template_get`, `template_create`, `template_update`, `template_preview` (low); `template_delete` (**high**) |
 | Assets | `assets_list`, `asset_get`, `asset_submit` (draft→in_review via the real state machine), `asset_versions` (low); `asset_generate` (**medium** — validates, then stages an approval: generation bills the LLM provider, so it never enqueues from voice); `asset_reject` (**high**) |
-| Campaigns | `campaign_get`, `campaign_create` (draft), `campaign_update`, `campaign_steps_add`, `campaign_step_update`, `campaign_enrollments` (low); `campaign_launch` (**high** — validates launch-readiness, then approval) |
+| Campaigns | `campaign_get`, `campaign_update`, `campaign_step_update`, `campaign_enrollments` (low); `campaign_create` (**medium** — creates DRAFT with optional drip steps, never auto-launches), `campaign_steps_add` (**medium** — draft campaigns only); `campaign_enroll` (**high** — enrolls contacts by id/query into draft/scheduled, skips duplicates + unsubscribed); `campaign_launch` (**high** — validates launch-readiness incl. enrollment count, then approval) |
 | Autopilot | `autopilot_update` (low — auto-approve, channel approvals, daily cap, quiet hours); `autopilot_plan_approve` (**medium** — validates the draft plan, then stages an approval: approving materializes a scheduled campaign, so it never executes from voice) |
 | Affiliates | `affiliate_programs_list/get/create/update`, `affiliate_links_list/get/create/update`, `affiliate_earnings` (low, aggregated honestly from stored events); `affiliate_program_delete` (cascades), `affiliate_link_delete` (**high**) |
 | Analytics | `analytics_funnel`, `analytics_weekly_summary` (low) |

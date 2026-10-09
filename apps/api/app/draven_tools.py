@@ -1002,6 +1002,17 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
     if re.search(r"\bcreate\b.*\bcampaign\b|\bnew campaign\b", msg):
         name = _extract_name_fragment(message, ["create", "new"])
         add("draven.campaign_create", {"name": name} if name else {})
+    # Drip/automation phrasing: "create a drip campaign", "set up a welcome
+    # sequence", "build a nurture sequence" — all map to campaign_create.
+    if re.search(
+        r"\bdrip\b|\bwelcome sequence\b|\bnurture sequence\b|\bfollow[- ]?up sequence\b|"
+        r"\bemail sequence\b|\bautomation\b.*\bcampaign\b|\bcampaign\b.*\bautomation\b",
+        msg,
+    ) and "draven.campaign_create" not in seen:
+        name = _extract_name_fragment(
+            message, ["create", "set", "setup", "set up", "build", "make", "new"]
+        )
+        add("draven.campaign_create", {"name": name} if name else {})
     if re.search(r"\bupdate\b.*\bcampaign\b|\bedit\b.*\bcampaign\b", msg):
         name = _extract_name_fragment(message, ["update", "edit"])
         add(
@@ -1035,6 +1046,20 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
             "draven.campaign_enrollments",
             {"campaign_name": _campaign_frag} if _campaign_frag else {},
         )
+    # Enrolling contacts: "enroll contacts in the welcome campaign",
+    # "add these contacts to the campaign" — maps to campaign_enroll.
+    if re.search(
+        r"\benroll\b.*\bcontacts?\b|\badd\b.*\bcontacts?\b.*\bto\b.*\bcampaign\b|"
+        r"\bsubscribe\b.*\bcontacts?\b.*\bcampaign\b",
+        msg,
+    ):
+        query = _extract_search_query(message)
+        inp_enroll: dict[str, Any] = {}
+        if _campaign_frag:
+            inp_enroll["campaign_name"] = _campaign_frag
+        if query:
+            inp_enroll["contact_query"] = query
+        add("draven.campaign_enroll", inp_enroll)
 
     # Autopilot writes.
     if re.search(r"\bupdate\b.*\bautopilot\b|\bautopilot\b.*\bsettings\b", msg):

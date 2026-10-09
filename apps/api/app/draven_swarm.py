@@ -407,11 +407,13 @@ def _heuristic_plan(goal: str) -> list[Subtask]:
 
 
 async def _llm_plan(
-    provider: Any, provider_name: str, goal: str, context: dict[str, Any]
+    provider: Any, provider_name: str, goal: str, context: dict[str, Any],
+    configured: bool = True,
 ) -> list[Subtask] | None:
     """Ask the configured LLM to decompose the goal. Returns None when the
-    provider is the stub or the plan is unusable (caller falls back)."""
-    if provider_name == "stub":
+    provider is unconfigured (or the stub) or the plan is unusable
+    (caller falls back)."""
+    if not configured or provider_name == "stub":
         return None
     agent_cards = "\n".join(
         f"- {a.id}: {a.role} (tools: {', '.join(a.allowed_tools)})"
@@ -492,11 +494,13 @@ class Orchestrator:
         provider: Any,
         provider_name: str,
         run_id: uuid.UUID,
+        provider_configured: bool = True,
     ) -> None:
         self._sessions = session_factory
         self._user = user
         self._provider = provider
         self._provider_name = provider_name
+        self._provider_configured = provider_configured
         self._run_id = run_id
         self._seq = 0
         self._lock = asyncio.Lock()
@@ -633,14 +637,16 @@ class Orchestrator:
         finally:
             db.close()
 
-        # Reasoning: real LLM when configured, honest degradation on stub.
+        # Reasoning: real LLM when configured, honest degradation otherwise.
         summary_parts: list[str] = []
-        if self._provider_name == "stub":
+        if not self._provider_configured or self._provider_name == "stub":
             degraded = True
             status = "degraded"
             summary_parts.append(
-                "LLM provider not configured (stub mode): ran real tools, "
-                "skipped generative reasoning — no output was invented.")
+                "LLM provider not configured: ran real tools, "
+                "skipped generative reasoning — no output was invented. "
+                "Connect a provider (e.g. Gemini) in Settings → AI provider "
+                "for full reasoning.")
         else:
             try:
                 from forge_llm import GenerationRequest
@@ -708,13 +714,15 @@ class Orchestrator:
                         {"goal": goal[:500]})
 
         plan = await _llm_plan(self._provider, self._provider_name,
-                               goal, context)
+                               goal, context,
+                               configured=self._provider_configured)
         if plan is None:
             plan = _heuristic_plan(goal)
             await self.emit(None, "note",
-                            "Using deterministic task plan (stub provider or "
-                            "LLM planning unavailable) — agents run real "
-                            "tools; generative steps degrade honestly.")
+                            "Using deterministic task plan (provider "
+                            "unconfigured or LLM planning unavailable) — "
+                            "agents run real tools; generative steps degrade "
+                            "honestly.")
 
         results: dict[str, dict[str, Any]] = {}
         failed = False
@@ -833,9 +841,11 @@ async def run_swarm(
     run_id: uuid.UUID,
     goal: str,
     context: dict[str, Any] | None = None,
+    provider_configured: bool = True,
 ) -> None:
     """Entry point: execute one swarm run to completion (or honest failure)."""
-    orch = Orchestrator(session_factory, user, provider, provider_name, run_id)
+    orch = Orchestrator(session_factory, user, provider, provider_name, run_id,
+                        provider_configured=provider_configured)
     try:
         await asyncio.wait_for(orch.run(goal, context or {}), RUN_TIMEOUT_S)
     except asyncio.TimeoutError:

@@ -207,9 +207,7 @@ end to end on stubs, and show me the autopilot drafting next week's
 plan from the evidence it collected.
 ```
 
-*In this repo: `apps/worker/worker/jobs.py` (`campaign_tick`, triggers),
-`apps/api/app/routers/campaigns.py`, content calendar + autopilot settings in
-the web UI (`/calendar`, `/campaigns`).*
+*In this repo: `apps/worker/worker/jobs.py` (`campaign_tick`, triggers, `autopilot_plan` — drafts the weekly content plan Monday 06:00 business-local), `apps/api/app/routers/campaigns.py` + `apps/api/app/routers/autopilot.py` (`GET /autopilot/plan`, `POST /autopilot/plan/approve` → materializes a scheduled campaign), content calendar + plan review in the web UI (`/calendar`, `/campaigns`, `/autopilot`).*
 
 ## Card 5: Evidence
 
@@ -240,8 +238,7 @@ Show me: fake a week's engagement on stubs, then show me the weekly
 summary changing the next generation brief.
 ```
 
-*In this repo: `apps/api/app/routers/analytics.py`, `events.py`,
-webhook ingestion, analytics views in the web UI (`/analytics`).*
+*In this repo: `apps/api/app/routers/analytics.py` (incl. `GET /analytics/weekly-summary`), `events.py`, webhook ingestion, analytics views in the web UI (`/analytics`), and the hourly `weekly_summary` worker job in `apps/worker/worker/jobs.py` (top/bottom assets, best channel per segment, recommendation paragraph wired into the Origination brief).*
 
 ## Six rules carried into every layer
 
@@ -291,7 +288,7 @@ make seed
 # 3. Open the app: http://localhost:8080
 ```
 
-Demo login: `demo@forgeos.local` / `demo1234`
+Demo login: `demo@forgeos.local` / `demo1234` (Acme Demo Co) · second login: `demo2@forgeos.local` / `demo1234` (Beta Demo Co)
 
 Walk the loop on stubs (nothing leaves your machine): **generate** an asset
 (`/assets` or `POST /api/v1/assets/generate`) → **approve** it (`/approvals`)

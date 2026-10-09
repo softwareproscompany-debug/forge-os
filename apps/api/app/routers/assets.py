@@ -65,6 +65,7 @@ async def generate_asset(
         variables=dict(payload.variables),
         status=AssetStatus.draft,
         created_by=user.id,
+        is_affiliate_content=payload.is_affiliate_content,
     )
     if template_id is not None:
         asset.variables = {**asset.variables, "_template_id": str(template_id)}
@@ -117,6 +118,27 @@ def list_assets(
 @router.get("/{asset_id}", response_model=schemas.AssetOut)
 def get_asset(asset_id: uuid.UUID, user: CurrentUser, db: DbSession):
     return get_owned_or_404(db, Asset, asset_id, user)
+
+
+@router.patch("/{asset_id}", response_model=schemas.AssetOut)
+def update_asset(
+    asset_id: uuid.UUID,
+    payload: schemas.AssetUpdateRequest,
+    user: CurrentUser,
+    db: DbSession,
+):
+    """Update asset metadata (currently just the affiliate-content flag).
+
+    Does not touch the approval state machine — use submit/approve/reject
+    for status changes.
+    """
+    asset = get_owned_or_404(db, Asset, asset_id, user)
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        setattr(asset, field, value)
+    db.commit()
+    db.refresh(asset)
+    return asset
 
 
 def _transition(

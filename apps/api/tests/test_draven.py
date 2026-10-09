@@ -179,7 +179,10 @@ def test_tools_list(user_a):
     assert "draven.business_summary" in ids
     assert "draven.campaign_pause" in ids
     assert "draven.asset_approve" in ids
-    assert len(tools) == 9
+    assert "market.research_start" in ids
+    assert "market.research_status" in ids
+    assert "market.top_opportunities" in ids
+    assert len(tools) == 67  # 59 draven.* + 3 market.* + 5 alpha.*
     for t in tools:
         assert set(t) == {"id", "description", "risk", "input_schema"}
         assert t["risk"] in ("low", "medium", "high")
@@ -239,6 +242,216 @@ def test_chat_no_intent(user_a):
     body = r.json()
     assert body["tools_used"] == []
     assert body["approvals_needed"] == []
+
+
+# ---------------------------------------------------------------------------
+# assistant personas (draven / calcifer)
+# ---------------------------------------------------------------------------
+
+
+def test_chat_persona_defaults_to_draven(user_a):
+    r = client.post(
+        "/api/v1/draven/chat",
+        json={"message": "what is your name", "history": []},
+        headers=_headers(user_a["token"]),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "Draven" in body["reply"]
+    assert "Calcifer" not in body["reply"]
+    assert body["tools_used"] == []
+
+
+def test_chat_persona_calcifer_identity(user_a):
+    r = client.post(
+        "/api/v1/draven/chat",
+        json={"message": "who are you", "history": [], "persona": "calcifer"},
+        headers=_headers(user_a["token"]),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "Calcifer" in body["reply"]
+    assert body["tools_used"] == []
+
+
+def test_chat_persona_calcifer_tools_still_work(user_a):
+    # Persona changes identity wording only — tool behavior is identical.
+    r = client.post(
+        "/api/v1/draven/chat",
+        json={"message": "summarize today", "history": [], "persona": "calcifer"},
+        headers=_headers(user_a["token"]),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["tools_used"], "expected tool runs regardless of persona"
+
+
+def test_chat_persona_invalid_is_rejected(user_a):
+    r = client.post(
+        "/api/v1/draven/chat",
+        json={"message": "hi", "history": [], "persona": "gandalf"},
+        headers=_headers(user_a["token"]),
+    )
+    assert r.status_code == 422, r.text
+
+
+# ---------------------------------------------------------------------------
+# conversational slot-filling (pending intents)
+# ---------------------------------------------------------------------------
+
+
+def _chat(user_a, message, **kw):
+    r = client.post(
+        "/api/v1/draven/chat",
+        json={"message": message, "history": [], **kw},
+        headers=_headers(user_a["token"]),
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_pending_research_ask_then_fill(user_a):
+    # No category -> the assistant asks, and records a pending intent.
+    first = _chat(user_a, "find products that sell well")
+    assert "which product category" in first["reply"]
+    assert first["tools_used"], "expected the research tool to have run (and errored)"
+
+    # The plain answer fills the slot and the original tool executes.
+    second = _chat(user_a, "kitchen gadgets")
+    assert "Got it \u2014 researching kitchen gadgets." in second["reply"]
+    ids = [t["tool"] for t in second["tools_used"]]
+    assert "market.research_start" in ids
+    statuses = {t["tool"]: t["status"] for t in second["tools_used"]}
+    assert statuses["market.research_start"] == "ok"
+
+
+def test_pending_new_command_clears(user_a):
+    _chat(user_a, "find products that sell well")
+    # A real command supersedes the pending question.
+    mid = _chat(user_a, "summarize today")
+    assert "Got it \u2014 researching" not in mid["reply"]
+    assert any(t["tool"] == "draven.business_summary" for t in mid["tools_used"])
+    # The category answer afterwards is NOT treated as a fill anymore.
+    after = _chat(user_a, "kitchen gadgets")
+    assert "Got it \u2014 researching" not in after["reply"]
+    assert after["tools_used"] == []
+
+
+def test_pending_cancel(user_a):
+    _chat(user_a, "find products that sell well")
+    cancelled = _chat(user_a, "never mind, cancel that")
+    assert "dropped" in cancelled["reply"]
+    after = _chat(user_a, "kitchen gadgets")
+    assert "Got it \u2014 researching" not in after["reply"]
+    assert after["tools_used"] == []
+
+
+def test_pending_unmappable_answer_reasks(user_a):
+    from app import draven_conversation as conv
+
+    _chat(user_a, "find products that sell well")
+    # A question-shaped reply can't be mapped -> specific re-ask, pending kept.
+    again = _chat(user_a, "what do you mean?")
+    assert "still need a product category" in again["reply"]
+    assert again["tools_used"] == []
+    # And the real answer still fills afterwards.
+    filled = _chat(user_a, "pet supplies")
+    assert "Got it \u2014 researching pet supplies." in filled["reply"]
+
+
+def test_pending_ttl_expiry():
+    import time
+    from app import draven_conversation as conv
+    from app.draven_conversation import PendingIntent
+
+    conv.set_pending(
+        "00000000-0000-0000-0000-000000000000",
+        PendingIntent(
+            kind="market.research_start",
+            missing_slots=["category"],
+            asked_at=time.time() - conv.TTL_S - 1,
+        ),
+    )
+    assert conv.get_pending("00000000-0000-0000-0000-000000000000") is None
+
+
+def test_pending_identity_not_consumed(user_a):
+    _chat(user_a, "find products that sell well")
+    # Asking the assistant's name answers directly; the pending question survives.
+    ident = _chat(user_a, "what is your name")
+    assert "Draven" in ident["reply"]
+    filled = _chat(user_a, "home fitness")
+    assert "Got it \u2014 researching home fitness." in filled["reply"]
+
+
+# ---------------------------------------------------------------------------
+# time-aware greetings + manners
+# ---------------------------------------------------------------------------
+
+
+def test_time_salutation_boundaries():
+    from datetime import datetime
+
+    from app.routers.draven import time_salutation
+
+    cases = [
+        (4, 59, "Good evening"),
+        (5, 0, "Good morning"),
+        (11, 59, "Good morning"),
+        (12, 0, "Good afternoon"),
+        (16, 59, "Good afternoon"),
+        (17, 0, "Good evening"),
+        (23, 30, "Good evening"),
+        (0, 15, "Good evening"),
+    ]
+    for h, m, expected in cases:
+        assert time_salutation(datetime(2026, 10, 9, h, m)) == expected
+
+
+def test_chat_identity_salutation_with_tz(user_a):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.routers.draven import time_salutation
+
+    for persona, name in (("draven", "Draven"), ("calcifer", "Calcifer")):
+        body = _chat(
+            user_a,
+            "who are you",
+            persona=persona,
+            client_tz="America/Chicago",
+        )
+        expected = time_salutation(datetime.now(ZoneInfo("America/Chicago")))
+        assert body["reply"].startswith(f"{expected}! "), body["reply"][:40]
+        assert name in body["reply"]
+
+
+def test_chat_identity_no_tz_no_salutation(user_a):
+    body = _chat(user_a, "introduce yourself")
+    assert body["reply"].startswith("I'm Draven \u2014")
+    assert not body["reply"].startswith("Good ")
+
+
+def test_chat_identity_invalid_tz_rejected(user_a):
+    r = client.post(
+        "/api/v1/draven/chat",
+        json={
+            "message": "who are you",
+            "history": [],
+            "client_tz": "Mars/Olympus_Mons",
+        },
+        headers=_headers(user_a["token"]),
+    )
+    assert r.status_code == 422, r.text
+
+
+def test_persona_system_prompts_carry_manners():
+    from app.routers.draven import _PERSONAS
+
+    for pid, p in _PERSONAS.items():
+        sp = p["system_prompt"].lower()
+        assert "manners" in sp, pid
+        assert "greet" in sp, pid
 
 
 # ---------------------------------------------------------------------------
@@ -715,13 +928,16 @@ def test_tts_speak_success_returns_audio_and_audits_cost(monkeypatch):
         },
     )
     assert r.status_code == 200, r.text
+    # default is MP3 HD: universal device compatibility, passes the raw
+    # payload straight through (no WAV container)
     assert r.headers["content-type"] == "audio/mpeg"
     assert r.content == _FAKE_AUDIO
-    # default model applied server-side
+    # default model + default format applied server-side
     tts_calls = [c for c in seen["calls"] if c["path"].startswith("/v1/text-to-speech/")]
     assert len(tts_calls) == 1
     assert tts_calls[0]["path"] == "/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
     assert tts_calls[0]["json_body"]["model_id"] == "eleven_multilingual_v2"
+    assert tts_calls[0]["json_body"]["output_format"] == "mp3_44100_192"
 
     db = TestingSession()
     try:
@@ -745,6 +961,45 @@ def test_tts_speak_success_returns_audio_and_audits_cost(monkeypatch):
         assert TTS_TEST_KEY not in str(row.input)
     finally:
         db.close()
+
+
+def test_tts_speak_mp3_format_returns_mpeg(monkeypatch):
+    seen: dict = {}
+    user = _tts_business(monkeypatch, seen)
+    r = client.post(
+        "/api/v1/draven/tts/speak",
+        headers=_headers(user["token"]),
+        json={
+            "text": "Hello from Draven",
+            "voice_id": "21m00Tcm4TlvDq8ikWAM",
+            "output_format": "mp3_44100_192",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "audio/mpeg"
+    assert r.content == _FAKE_AUDIO  # MP3 passes through unwrapped
+    tts_calls = [c for c in seen["calls"] if c["path"].startswith("/v1/text-to-speech/")]
+    assert tts_calls[0]["json_body"]["output_format"] == "mp3_44100_192"
+
+
+def test_tts_speak_rejects_unknown_output_format(monkeypatch):
+    seen: dict = {}
+    user = _tts_business(monkeypatch, seen)
+    r = client.post(
+        "/api/v1/draven/tts/speak",
+        headers=_headers(user["token"]),
+        json={
+            "text": "hi",
+            "voice_id": "21m00Tcm4TlvDq8ikWAM",
+            "output_format": "flac_96000",
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert "output_format" in r.json()["detail"]
+    # rejected before any upstream call
+    assert not [
+        c for c in seen.get("calls", []) if c["path"].startswith("/v1/text-to-speech/")
+    ]
 
 
 def test_tts_speak_rejects_unknown_voice(monkeypatch):

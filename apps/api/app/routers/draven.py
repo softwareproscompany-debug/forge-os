@@ -71,7 +71,7 @@ router = APIRouter(prefix="/draven", tags=["draven"])
 
 AdminUser = Annotated[User, Depends(require_role("owner", "admin"))]
 
-_ALLOWED_PROVIDERS = ("stub", "anthropic", "openai_compatible")
+_ALLOWED_PROVIDERS = ("gemini", "anthropic", "openrouter", "ollama", "openai_compatible")
 
 # In-process emergency stop: timestamp of the last POST /draven/stop.
 # Blocks new tool executions for 60s. Single-process scope — in a
@@ -301,11 +301,15 @@ class ProviderStatus(BaseModel):
 class ProviderConfigIn(BaseModel):
     """Admin provider configuration.
 
-    Chat LLM provider: ``provider`` in {"stub", "anthropic",
-    "openai_compatible"}. Passing ``provider="elevenlabs"`` (optionally with
-    ``api_key``) is accepted as a shorthand that configures the TTS voice
-    provider instead, leaving the chat provider untouched.
-    Explicit ``tts_provider``/``tts_api_key`` fields do the same job.
+    Chat LLM provider: ``provider`` in {"gemini", "anthropic", "openrouter",
+    "ollama", "openai_compatible"} (stub is not offered — an unconfigured
+    provider reports ``configured=false`` instead). Passing
+    ``provider="elevenlabs"`` (optionally with ``api_key``) is accepted as a
+    shorthand that configures the TTS voice provider instead, leaving the
+    chat provider untouched.
+    Explicit ``tts_provider``/``tts_api_key`` fields do the same job; pairing
+    an explicit ``tts_provider`` with ``provider="stub"`` is a TTS-only
+    update that leaves the chat provider columns untouched.
     """
 
     provider: str
@@ -397,7 +401,10 @@ def _build_provider_from_config(
     """
     from forge_llm.providers import (
         AnthropicProvider,
+        GeminiProvider,
+        OllamaProvider,
         OpenAICompatibleProvider,
+        OpenRouterProvider,
         StubProvider,
     )
 
@@ -411,12 +418,31 @@ def _build_provider_from_config(
         return decrypt_secret(fernet, legacy_enc)
 
     if row.provider == "stub":
+        # Legacy rows: stub is no longer a user-facing option. It is treated
+        # as "not configured" everywhere (see _resolve_provider).
         return StubProvider(), "stub"
     if row.provider == "anthropic":
         api_key = _vault_or_legacy("anthropic.api_key", row.api_key_enc)
         if not api_key:
             raise ValueError("anthropic provider is missing its API key")
         return AnthropicProvider(api_key=api_key, model=row.model), row.model
+    if row.provider == "gemini":
+        api_key = _vault_or_legacy("gemini.api_key", row.api_key_enc)
+        if not api_key:
+            raise ValueError("gemini provider is missing its API key")
+        return GeminiProvider(api_key=api_key, model=row.model), row.model
+    if row.provider == "openrouter":
+        api_key = _vault_or_legacy("openrouter.api_key", row.api_key_enc)
+        if not api_key:
+            raise ValueError("openrouter provider is missing its API key")
+        if not row.model:
+            raise ValueError("openrouter provider needs a model")
+        return OpenRouterProvider(api_key=api_key, model=row.model), row.model
+    if row.provider == "ollama":
+        base_url = _vault_or_legacy("ollama.base_url", row.base_url_enc)
+        if not row.model:
+            raise ValueError("ollama provider needs a model")
+        return OllamaProvider(base_url=base_url or None, model=row.model), row.model
     if row.provider == "openai_compatible":
         base_url = _vault_or_legacy("openai.base_url", row.base_url_enc)
         api_key = _vault_or_legacy("openai.api_key", row.api_key_enc)
@@ -435,20 +461,42 @@ def _build_provider_from_config(
 
 def _resolve_provider(
     db: Session, user: CurrentUser, settings
-) -> tuple[Any, str]:
+) -> tuple[Any, str, bool]:
     """Business config wins; otherwise fall back to the global env provider.
 
     Reads the DB per request so multi-worker deployments stay consistent.
-    Returns (provider_instance, provider_display_name).
+    Returns (provider_instance, display_name, configured).
+
+    "Configured" means a real LLM will actually answer. Anything else —
+    legacy stub rows, missing keys, unknown env values — resolves to a
+    StubProvider instance with configured=False, and callers must NOT
+    present it as a working AI (see the chat composition below).
+    When nothing is configured at all, the display name defaults to
+    "gemini" so the UI can point the user at the right setup step.
     """
+    from forge_llm.providers import StubProvider  # local: avoids import cost
+
     row = _business_config(db, user.business_id)
     if row is not None:
-        provider, _ = _build_provider_from_config(
-            db, user.business_id, row, settings
-        )
-        return provider, provider.name
-    provider = get_provider()
-    return provider, provider.name
+        if row.provider == "stub":
+            return StubProvider(), "stub", False
+        try:
+            provider, _ = _build_provider_from_config(
+                db, user.business_id, row, settings
+            )
+        except ValueError:
+            # Explicitly chosen but broken (e.g. key removed): unconfigured,
+            # never a silent stub.
+            return StubProvider(), row.provider, False
+        return provider, provider.name, True
+    name = (settings.LLM_PROVIDER or "").strip().lower()
+    if name in _ALLOWED_PROVIDERS:
+        try:
+            provider = get_provider()
+        except ValueError:
+            return StubProvider(), name, False
+        return provider, provider.name, True
+    return StubProvider(), "gemini", False
 
 
 def _tts_status(
@@ -484,38 +532,70 @@ def _config_status(
     tts = _tts_status(db, user, settings)
     ck = settings.DRAVEN_CONFIG_KEY
     if row is not None:
-        if row.provider == "stub":
-            configured = True
-        elif row.provider == "anthropic":
+        p = row.provider
+        if p == "stub":
+            # Legacy stub rows count as not configured.
+            configured = False
+        elif p == "anthropic":
             configured = (
                 vault.get_secret(db, user.business_id, "anthropic.api_key", ck)
                 is not None or row.api_key_enc is not None
             )
+        elif p == "gemini":
+            configured = (
+                vault.get_secret(db, user.business_id, "gemini.api_key", ck)
+                is not None or row.api_key_enc is not None
+            )
+        elif p == "openrouter":
+            configured = (
+                vault.get_secret(db, user.business_id, "openrouter.api_key", ck)
+                is not None or row.api_key_enc is not None
+            ) and bool(row.model)
+        elif p == "ollama":
+            # No key needed; a model must be chosen (base URL optional).
+            configured = bool(row.model)
         else:  # openai_compatible
             configured = (
                 vault.get_secret(db, user.business_id, "openai.base_url", ck)
                 is not None or row.base_url_enc is not None
             ) and bool(row.model)
         return ProviderStatus(
-            provider=row.provider,
+            provider=p,
             model=row.model,
             configured=configured,
             latency_ms=latency_ms,
             tts=tts,
         )
     # No business config — report the global env provider.
-    name = settings.LLM_PROVIDER
+    name = (settings.LLM_PROVIDER or "").strip().lower()
     if name == "anthropic":
         configured = bool(settings.ANTHROPIC_API_KEY)
         model = settings.ANTHROPIC_MODEL
+    elif name == "gemini":
+        configured = bool(settings.GEMINI_API_KEY)
+        model = settings.GEMINI_MODEL or "gemini-3.5-flash-lite"
+    elif name == "openrouter":
+        configured = bool(settings.OPENROUTER_API_KEY) and bool(
+            settings.OPENROUTER_MODEL
+        )
+        model = settings.OPENROUTER_MODEL or None
+    elif name == "ollama":
+        configured = bool(settings.OLLAMA_MODEL)
+        model = settings.OLLAMA_MODEL or None
     elif name == "openai_compatible":
         configured = bool(settings.OPENAI_COMPAT_BASE_URL) and bool(
             settings.OPENAI_COMPAT_MODEL
         )
         model = settings.OPENAI_COMPAT_MODEL or None
     else:
-        configured = True
-        model = "stub"
+        # Default: gemini, unconfigured. Stub is never reported as working.
+        return ProviderStatus(
+            provider="gemini",
+            model=None,
+            configured=False,
+            latency_ms=latency_ms,
+            tts=tts,
+        )
     return ProviderStatus(
         provider=name,
         model=model,
@@ -993,7 +1073,9 @@ async def chat(
         )
 
     routed = route_intent(payload.message)
-    provider, provider_name = _resolve_provider(db, user, settings)
+    provider, provider_name, provider_configured = _resolve_provider(
+        db, user, settings
+    )
 
     # --- Conversational slot-filling -------------------------------------
     # A routed intent is a new command: it supersedes any pending question.
@@ -1112,11 +1194,24 @@ async def chat(
                 ),
             )
 
-    # Compose the reply: real provider when configured, deterministic
-    # real-data summary in stub mode.
+    # Compose the reply: real provider when configured. When unconfigured,
+    # say plainly what's missing instead of the generic keyword fallback.
     estimated_cost = 0.0
-    if provider_name == "stub":
-        reply = _deterministic_reply(results)
+    if not provider_configured:
+        # No silent stub fallback: say plainly what's missing. Tools already
+        # ran above (they're real), so summarize them deterministically after
+        # the nudge instead of the generic "didn't find anything" fallback.
+        reply = (
+            f"{pname} isn't connected to an AI model yet — connect your "
+            "Gemini API key in Settings → AI provider to enable conversation. "
+        )
+        if results:
+            reply += _deterministic_reply(results)
+        else:
+            reply += (
+                "Meanwhile I can still run tools for you — ask about "
+                "approvals, campaigns, analytics, contacts, or autopilot."
+            )
     else:
         try:
             slim = [
@@ -1210,8 +1305,7 @@ def set_provider(
     """Save a per-business provider config (owner/admin only).
 
     ``api_key`` / ``base_url`` are Fernet-encrypted before storage; passing
-    ``null`` clears that field. ``provider="stub"`` needs no secrets and no
-    ``DRAVEN_CONFIG_KEY``. ``provider="elevenlabs"`` (or explicit
+    ``null`` clears that field. ``provider="elevenlabs"`` (or explicit
     ``tts_provider="elevenlabs"`` + ``tts_api_key``) configures the TTS voice
     provider instead of the chat provider; the ElevenLabs key is encrypted
     with the same Fernet mechanism. Secrets are never returned in any
@@ -1237,7 +1331,11 @@ def set_provider(
         )
 
     chat_provider = payload.provider
-    if not tts_shorthand:
+    # TTS-only update: an explicit tts_provider paired with the legacy "stub"
+    # placeholder means "change TTS, leave the chat provider untouched".
+    # (Stub itself is no longer a selectable chat provider.)
+    tts_only = payload.tts_provider is not None and chat_provider == "stub"
+    if not tts_shorthand and not tts_only:
         if chat_provider not in _ALLOWED_PROVIDERS:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1248,6 +1346,30 @@ def set_provider(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="anthropic provider requires api_key",
             )
+        if chat_provider == "gemini" and not payload.api_key:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="gemini provider requires api_key",
+            )
+        if chat_provider == "openrouter":
+            if not payload.api_key or not payload.model:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="openrouter provider requires api_key and model",
+                )
+        if chat_provider == "ollama":
+            if not payload.model:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="ollama provider requires model",
+                )
+            if payload.base_url:
+                scheme = payload.base_url.split("://")[0].lower()
+                if scheme not in ("http", "https"):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="base_url must use http or https",
+                    )
         if chat_provider == "openai_compatible":
             if not payload.base_url or not payload.model:
                 raise HTTPException(
@@ -1280,11 +1402,11 @@ def set_provider(
     if row is None:
         row = DravenProviderConfig(
             business_id=admin.business_id,
-            provider="stub" if tts_shorthand else chat_provider,
-            model=None if tts_shorthand else payload.model,
+            provider="stub" if (tts_shorthand or tts_only) else chat_provider,
+            model=None if (tts_shorthand or tts_only) else payload.model,
         )
         db.add(row)
-    elif not tts_shorthand:
+    elif not tts_shorthand and not tts_only:
         row.provider = chat_provider
         row.model = payload.model
     if tts_provider == "elevenlabs":
@@ -1295,7 +1417,7 @@ def set_provider(
         # Clearing needs no encryption key.
         row.tts_provider = None
         row.tts_api_key_enc = None
-    if not tts_shorthand:
+    if not tts_shorthand and not tts_only:
         if fernet is not None:
             row.api_key_enc = encrypt_secret(fernet, payload.api_key)
             row.base_url_enc = encrypt_secret(fernet, payload.base_url)
@@ -1317,13 +1439,32 @@ def set_provider(
             db, admin.business_id, "elevenlabs.api_key",
             actor=actor, config_key=ck,
         )
-    if not tts_shorthand and fernet is not None:
+    if not tts_shorthand and not tts_only and fernet is not None:
         if chat_provider == "anthropic" and payload.api_key:
             vault.put_secret(
                 db, admin.business_id, "anthropic.api_key", payload.api_key,
                 actor=actor, config_key=ck,
                 label="Anthropic API key (Draven provider panel)",
             )
+        elif chat_provider == "gemini" and payload.api_key:
+            vault.put_secret(
+                db, admin.business_id, "gemini.api_key", payload.api_key,
+                actor=actor, config_key=ck,
+                label="Gemini API key (Draven provider panel)",
+            )
+        elif chat_provider == "openrouter" and payload.api_key:
+            vault.put_secret(
+                db, admin.business_id, "openrouter.api_key", payload.api_key,
+                actor=actor, config_key=ck,
+                label="OpenRouter API key (Draven provider panel)",
+            )
+        elif chat_provider == "ollama":
+            if payload.base_url:
+                vault.put_secret(
+                    db, admin.business_id, "ollama.base_url", payload.base_url,
+                    actor=actor, config_key=ck,
+                    label="Ollama base URL (Draven provider panel)",
+                )
         elif chat_provider == "openai_compatible":
             if payload.api_key:
                 vault.put_secret(
@@ -1340,20 +1481,23 @@ def set_provider(
     db.commit()
     db.refresh(row)
 
+    _key_name = {
+        "anthropic": "anthropic.api_key",
+        "gemini": "gemini.api_key",
+        "openrouter": "openrouter.api_key",
+    }.get(row.provider, "openai.api_key")
+    _base_name = {
+        "ollama": "ollama.base_url",
+    }.get(row.provider, "openai.base_url")
     return ProviderConfigOut(
         provider=row.provider,
         model=row.model,
         has_api_key=(
-            vault.get_secret(
-                db, admin.business_id,
-                "anthropic.api_key"
-                if row.provider == "anthropic" else "openai.api_key",
-                ck,
-            )
+            vault.get_secret(db, admin.business_id, _key_name, ck)
             is not None or row.api_key_enc is not None
         ),
         has_base_url=(
-            vault.get_secret(db, admin.business_id, "openai.base_url", ck)
+            vault.get_secret(db, admin.business_id, _base_name, ck)
             is not None or row.base_url_enc is not None
         ),
         tts=_tts_status(db, admin, settings),
@@ -1372,9 +1516,20 @@ async def test_provider(
     Returns ok/latency/error. Never returns secret values.
     """
     try:
-        provider, _ = _resolve_provider(db, admin, settings)
+        provider, provider_name, provider_configured = _resolve_provider(
+            db, admin, settings
+        )
     except ValueError as exc:
         return ProviderTestOut(ok=False, latency_ms=None, error=str(exc)[:300])
+    if not provider_configured:
+        return ProviderTestOut(
+            ok=False,
+            latency_ms=None,
+            error=(
+                f"provider '{provider_name}' is not configured — add its "
+                "credentials in Settings → AI provider, then test again."
+            ),
+        )
 
     started = datetime.now(timezone.utc)
     try:
@@ -1746,7 +1901,9 @@ async def _swarm_task(
         goal = run.goal
         context = run.context or {}
         try:
-            provider, provider_name = _resolve_provider(db, user, settings)
+            provider, provider_name, provider_configured = _resolve_provider(
+                db, user, settings
+            )
         except ValueError as exc:
             # Honest degradation: say what's missing, run nothing.
             run.status = DravenSwarmRunStatus.failed
@@ -1761,7 +1918,8 @@ async def _swarm_task(
         db.close()
 
     await swarm.run_swarm(
-        factory, user, provider, provider_name, run_id, goal, context
+        factory, user, provider, provider_name, run_id, goal, context,
+        provider_configured=provider_configured,
     )
 
 

@@ -1739,3 +1739,145 @@ class ComplianceIssue(Base):  # noqa: F811 — distinct from app.compliance.chec
     violations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
     created_at: Mapped[datetime] = _created_at()
+
+
+# ---------------------------------------------------------------------------
+# Travel Agency workspace (Phase 1: Travel CRM foundation)
+#
+# Internal SaaS inside ForgeOS — one travel agency company == one
+# ``businesses`` row. EVERY table here is scoped by ``business_id`` via
+# ``_business_fk()``; all queries MUST filter on it. Never rename the
+# existing tenant columns; migrations are backward-compatible (additive).
+# ---------------------------------------------------------------------------
+
+
+class TravelCustomerType(str, enum.Enum):
+    individual = "individual"
+    corporate = "corporate"
+
+
+class TravelLeadStatus(str, enum.Enum):
+    new = "new"
+    qualified = "qualified"
+    quoted = "quoted"
+    booked = "booked"
+    lost = "lost"
+
+
+class TripRequestStatus(str, enum.Enum):
+    draft = "draft"
+    open = "open"
+    in_progress = "in_progress"
+    completed = "completed"
+    cancelled = "cancelled"
+
+
+class TravelCustomer(Base):
+    """A travel agency's customer — an individual or a corporate account."""
+
+    __tablename__ = "travel_customers"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    type: Mapped[TravelCustomerType] = mapped_column(
+        _enum_col(TravelCustomerType), nullable=False, default=TravelCustomerType.individual
+    )
+    notes: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.Index("ix_travel_customers_biz_name", "business_id", "name"),
+        sa.Index("ix_travel_customers_biz_email", "business_id", "email"),
+    )
+
+
+class TravelerProfile(Base):
+    """A traveler belonging to an agency customer (passenger-level detail)."""
+
+    __tablename__ = "traveler_profiles"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    customer_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("travel_customers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    dob: Mapped[Optional[datetime.date]] = mapped_column(sa.Date, nullable=True)
+    # Seat / meal / cabin preferences, etc. — flexible payload only.
+    preferences: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Loyalty memberships: {"airline": [{"program": ..., "number": ...}], ...}
+    loyalty: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    accessibility_notes: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.Index("ix_traveler_profiles_biz_name", "business_id", "full_name"),
+    )
+
+
+class TravelLead(Base):
+    """A sales lead: someone interested in travel. Status pipeline:
+
+    new -> qualified -> quoted -> booked | lost
+    """
+
+    __tablename__ = "travel_leads"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    customer_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("travel_customers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    destination: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    date_start: Mapped[Optional[datetime.date]] = mapped_column(sa.Date, nullable=True)
+    date_end: Mapped[Optional[datetime.date]] = mapped_column(sa.Date, nullable=True)
+    budget: Mapped[Optional[Decimal]] = mapped_column(
+        sa.Numeric(12, 2), nullable=True
+    )
+    trip_purpose: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    assigned_to: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    status: Mapped[TravelLeadStatus] = mapped_column(
+        _enum_col(TravelLeadStatus), nullable=False, default=TravelLeadStatus.new, index=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.Index("ix_travel_leads_biz_status", "business_id", "status"),
+    )
+
+
+class TripRequest(Base):
+    """A concrete trip request derived from a qualified lead."""
+
+    __tablename__ = "trip_requests"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    lead_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("travel_leads.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    customer_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("travel_customers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    party_size: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=1)
+    origin: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Ordered list of destinations: ["CDG", "NCE"] or full names.
+    destinations: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    date_start: Mapped[Optional[datetime.date]] = mapped_column(sa.Date, nullable=True)
+    date_end: Mapped[Optional[datetime.date]] = mapped_column(sa.Date, nullable=True)
+    preferences: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    flexibility: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[TripRequestStatus] = mapped_column(
+        _enum_col(TripRequestStatus), nullable=False, default=TripRequestStatus.open, index=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.Index("ix_trip_requests_biz_status", "business_id", "status"),
+    )

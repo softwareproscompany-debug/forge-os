@@ -14,10 +14,14 @@ from forge_llm import (
     build_brand_system_prompt,
     check_guardrails,
     default_registry,
+    ensure_affiliate_disclosure,
     estimate_cost,
     get_provider,
+    has_affiliate_disclosure,
+    looks_like_affiliate_content,
     render,
 )
+from forge_llm.brand import AFFILIATE_DISCLOSURE
 
 
 # ---------------------------------------------------------------------------
@@ -283,3 +287,59 @@ def test_get_provider_unknown_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "watson")
     with pytest.raises(ValueError, match="Unknown LLM_PROVIDER"):
         get_provider()
+
+
+# ---------------------------------------------------------------------------
+# Affiliate disclosure guardrail (FTC)
+# ---------------------------------------------------------------------------
+
+
+def test_check_guardrails_flags_missing_affiliate_disclosure() -> None:
+    violations = check_guardrails(
+        "Check out this espresso maker: https://shop.example/r/maker",
+        _brand(is_affiliate_content=True),
+    )
+    assert any("affiliate disclosure" in v for v in violations)
+
+
+def test_check_guardrails_affiliate_disclosure_present_passes() -> None:
+    text = (
+        "Check out this espresso maker: https://shop.example/r/maker\n\n"
+        "Disclosure: this post contains affiliate links."
+    )
+    violations = check_guardrails(text, _brand(is_affiliate_content=True))
+    assert not any("affiliate disclosure" in v for v in violations)
+
+
+def test_check_guardrails_no_affiliate_flag_no_disclosure_needed() -> None:
+    violations = check_guardrails("Just a regular newsletter.", _brand())
+    assert not any("affiliate" in v for v in violations)
+
+
+def test_has_affiliate_disclosure_matches_phrases() -> None:
+    assert has_affiliate_disclosure("As an Amazon Associate I earn.")
+    assert has_affiliate_disclosure("We may earn a commission here.")
+    assert not has_affiliate_disclosure("Buy now, limited offer!")
+
+
+def test_looks_like_affiliate_content_detects_short_links() -> None:
+    assert looks_like_affiliate_content("Grab it here: https://api.example/r/deal-1")
+    assert not looks_like_affiliate_content("Visit https://example.com/deals today")
+
+
+def test_ensure_affiliate_disclosure_appends_once() -> None:
+    text, appended = ensure_affiliate_disclosure("Great deal on grinders.")
+    assert appended is True
+    assert text.endswith(AFFILIATE_DISCLOSURE)
+    # Idempotent: never appends twice.
+    text2, appended2 = ensure_affiliate_disclosure(text)
+    assert appended2 is False
+    assert text2 == text
+    assert text2.count(AFFILIATE_DISCLOSURE) == 1
+
+
+def test_ensure_affiliate_disclosure_skips_when_present() -> None:
+    text, appended = ensure_affiliate_disclosure(
+        "Deal! Disclosure: this contains affiliate links."
+    )
+    assert appended is False

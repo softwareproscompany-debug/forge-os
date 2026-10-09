@@ -2902,11 +2902,11 @@ _register(
 _register(
     ToolDef(
         id="draven.campaign_create",
-        description="MEDIUM RISK — create a campaign as DRAFT with an optional drip sequence "
+        description="Create a campaign as DRAFT with an optional drip sequence "
         "(ordered steps: channel, delay_hours, template/asset by id or name). "
         "Never auto-launches; launch requires separate human approval.",
         input_model=CampaignCreateInput,
-        risk="medium",
+        risk="low",
         execute=_campaign_create,
     )
 )

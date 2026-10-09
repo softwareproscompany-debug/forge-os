@@ -1,0 +1,157 @@
+# ForgeOS — local development stack
+# Works with ZERO external keys: all LLM/channel providers default to `stub`.
+# Quickstart:  cp .env.example .env   (optional — defaults below are enough)
+#              docker compose up --build
+
+name: forgeos
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-forge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-forge}
+      POSTGRES_DB: ${POSTGRES_DB:-forge}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-forge} -d ${POSTGRES_DB:-forge}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://forge:forge@postgres:5432/forge}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-1440}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+      LLM_PROVIDER: ${LLM_PROVIDER:-stub}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
+      CHANNEL_MODE: ${CHANNEL_MODE:-stub}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@example.com}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SES_REGION: ${SES_REGION:-}
+      SES_ACCESS_KEY: ${SES_ACCESS_KEY:-}
+      SES_SECRET_KEY: ${SES_SECRET_KEY:-}
+      SMS_PROVIDER: ${SMS_PROVIDER:-twilio}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      SOCIAL_META_PAGE_TOKEN: ${SOCIAL_META_PAGE_TOKEN:-}
+      SOCIAL_LINKEDIN_TOKEN: ${SOCIAL_LINKEDIN_TOKEN:-}
+      SOCIAL_X_API_KEY: ${SOCIAL_X_API_KEY:-}
+      SOCIAL_X_API_SECRET: ${SOCIAL_X_API_SECRET:-}
+      SEED_DEMO: ${SEED_DEMO:-false}
+    entrypoint: ["/entrypoint.sh"]
+    command: uvicorn ${API_APP_MODULE:-app.main:app} --host 0.0.0.0 --port 8000
+    volumes:
+      # infra-owned migration entrypoint; does not touch apps/api source
+      - ./docker-entrypoint.sh:/entrypoint.sh:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./apps/worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://forge:forge@postgres:5432/forge}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+      LLM_PROVIDER: ${LLM_PROVIDER:-stub}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
+      OPENAI_COMPAT_BASE_URL: ${OPENAI_COMPAT_BASE_URL:-}
+      OPENAI_COMPAT_API_KEY: ${OPENAI_COMPAT_API_KEY:-}
+      OPENAI_COMPAT_MODEL: ${OPENAI_COMPAT_MODEL:-}
+      CHANNEL_MODE: ${CHANNEL_MODE:-stub}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@example.com}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SES_REGION: ${SES_REGION:-}
+      SES_ACCESS_KEY: ${SES_ACCESS_KEY:-}
+      SES_SECRET_KEY: ${SES_SECRET_KEY:-}
+      SMS_PROVIDER: ${SMS_PROVIDER:-twilio}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      SOCIAL_META_PAGE_TOKEN: ${SOCIAL_META_PAGE_TOKEN:-}
+      SOCIAL_LINKEDIN_TOKEN: ${SOCIAL_LINKEDIN_TOKEN:-}
+      SOCIAL_X_API_KEY: ${SOCIAL_X_API_KEY:-}
+      SOCIAL_X_API_SECRET: ${SOCIAL_X_API_SECRET:-}
+    # arq CLI: `arq <module>.<WorkerSettings class>`. The worker workstream owns
+    # the module; override via ARQ_WORKER_SETTINGS if it differs.
+    command: arq ${ARQ_WORKER_SETTINGS:-worker.settings.WorkerSettings}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  pgdata:
+  redisdata:

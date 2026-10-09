@@ -16,6 +16,7 @@ import OutboxPage from "./pages/Outbox";
 import OpsPage from "./pages/Ops";
 import InterviewPage from "./pages/Interview";
 import BrainPage from "./pages/Brain";
+import AffiliatesPage from "./pages/Affiliates";
 
 export default function App() {
   return (
@@ -44,6 +45,7 @@ export default function App() {
             <Route path="/ops" element={<OpsPage />} />
             <Route path="/brain" element={<BrainPage />} />
             <Route path="/interview" element={<InterviewPage />} />
+            <Route path="/affiliates" element={<AffiliatesPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

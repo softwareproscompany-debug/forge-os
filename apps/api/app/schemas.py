@@ -533,6 +533,44 @@ class OpsActivityResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Brain (Card 5 knowledge-graph views — read-only, one JSON for all views)
+# ---------------------------------------------------------------------------
+
+
+class BrainNode(BaseModel):
+    id: str
+    label: str
+    detail: str | None = None
+    at: datetime | None = None
+
+
+class BrainLink(BaseModel):
+    source: str
+    target: str
+    kind: Literal["brand", "asset", "campaign", "engagement"]
+
+
+class BrainLayer(BaseModel):
+    key: str
+    label: str
+    count: int
+    nodes: list[BrainNode]
+
+
+class BrainTimelinePoint(BaseModel):
+    at: datetime
+    kind: Literal["sent", "opened", "clicked", "converted", "event"]
+    label: str
+
+
+class BrainResponse(BaseModel):
+    as_of: datetime
+    layers: list[BrainLayer]
+    links: list[BrainLink]
+    timeline: list[BrainTimelinePoint]
+
+
+# ---------------------------------------------------------------------------
 # Interview (Card 0 guided interview)
 # ---------------------------------------------------------------------------
 

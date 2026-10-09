@@ -168,7 +168,7 @@ export default function OpsPage() {
         <StatCard
           label="Generations today"
           value={data.counters.generations_today}
-          tone="cyan"
+          tone="magenta"
         />
         <StatCard label="In flight now" value={data.counters.in_flight} />
       </div>

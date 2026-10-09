@@ -1001,3 +1001,177 @@ export const affiliatesApi = {
     return `${base}/r/${slug}`;
   },
 };
+
+/* ------------------------------------------------------------------ */
+/* OS screens: Pipeline / Meetings / Knowledge / Integrations         */
+/* ------------------------------------------------------------------ */
+
+export type OpportunityStage =
+  | "new"
+  | "qualified"
+  | "proposal"
+  | "negotiation"
+  | "closed"
+  | "lost";
+
+export interface Opportunity {
+  id: string;
+  business_id: string;
+  title: string;
+  contact_id: string | null;
+  value_cents: number;
+  stage: OpportunityStage;
+  probability: number;
+  expected_close_date: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface OpportunityInput {
+  title: string;
+  contact_id?: string | null;
+  value_cents?: number;
+  stage?: OpportunityStage;
+  probability?: number;
+  expected_close_date?: string | null;
+  notes?: string | null;
+}
+
+export const pipelineApi = {
+  list(params?: { stage?: OpportunityStage }): Promise<Opportunity[]> {
+    return apiFetch<unknown>("/pipeline", { params }).then(asItems<Opportunity>);
+  },
+  create(data: OpportunityInput): Promise<Opportunity> {
+    return apiFetch<Opportunity>("/pipeline", { method: "POST", body: data });
+  },
+  update(id: string, data: Partial<OpportunityInput>): Promise<Opportunity> {
+    return apiFetch<Opportunity>(`/pipeline/${id}`, { method: "PUT", body: data });
+  },
+  remove(id: string): Promise<void> {
+    return apiFetch<void>(`/pipeline/${id}`, { method: "DELETE" });
+  },
+};
+
+export interface Meeting {
+  id: string;
+  business_id: string;
+  title: string;
+  starts_at: string;
+  ends_at: string | null;
+  attendees: string[];
+  notes: string | null;
+  created_at: string;
+}
+
+export interface MeetingInput {
+  title: string;
+  starts_at: string;
+  ends_at?: string | null;
+  attendees?: string[];
+  notes?: string | null;
+}
+
+export const meetingsApi = {
+  list(params?: { upcoming?: boolean }): Promise<Meeting[]> {
+    return apiFetch<unknown>("/meetings", { params }).then(asItems<Meeting>);
+  },
+  create(data: MeetingInput): Promise<Meeting> {
+    return apiFetch<Meeting>("/meetings", { method: "POST", body: data });
+  },
+  update(id: string, data: Partial<MeetingInput>): Promise<Meeting> {
+    return apiFetch<Meeting>(`/meetings/${id}`, { method: "PUT", body: data });
+  },
+  remove(id: string): Promise<void> {
+    return apiFetch<void>(`/meetings/${id}`, { method: "DELETE" });
+  },
+};
+
+export interface KnowledgeDoc {
+  id: string;
+  business_id: string;
+  title: string;
+  content: string;
+  source: string | null;
+  created_at: string;
+}
+
+export interface KnowledgeDocInput {
+  title: string;
+  content?: string;
+  source?: string | null;
+}
+
+export const knowledgeApi = {
+  list(params?: { q?: string }): Promise<KnowledgeDoc[]> {
+    return apiFetch<unknown>("/knowledge", { params }).then(asItems<KnowledgeDoc>);
+  },
+  create(data: KnowledgeDocInput): Promise<KnowledgeDoc> {
+    return apiFetch<KnowledgeDoc>("/knowledge", { method: "POST", body: data });
+  },
+  update(id: string, data: Partial<KnowledgeDocInput>): Promise<KnowledgeDoc> {
+    return apiFetch<KnowledgeDoc>(`/knowledge/${id}`, { method: "PUT", body: data });
+  },
+  remove(id: string): Promise<void> {
+    return apiFetch<void>(`/knowledge/${id}`, { method: "DELETE" });
+  },
+};
+
+export interface IntegrationStatus {
+  key: string;
+  label: string;
+  connected: boolean;
+  detail: string | null;
+  settingsPath: string;
+}
+
+export const integrationsApi = {
+  async status(): Promise<IntegrationStatus[]> {
+    const [sections, provider] = await Promise.all([
+      apiFetch<{
+        sections: Array<{
+          id: string;
+          secrets: Array<{ key: string; label: string; configured: boolean }>;
+        }>;
+      }>("/settings/sections"),
+      apiFetch<{
+        provider: string;
+        model: string | null;
+        configured: boolean;
+        tts: { provider: string; configured: boolean };
+      }>("/draven/provider").catch(() => null),
+    ]);
+    const out: IntegrationStatus[] = [];
+    // AI provider (Draven brain)
+    out.push({
+      key: "ai-provider",
+      label: "AI provider",
+      connected: provider?.configured ?? false,
+      detail: provider
+        ? `${provider.provider}${provider.model ? ` · ${provider.model}` : ""}`
+        : null,
+      settingsPath: "/draven",
+    });
+    // Voice (ElevenLabs TTS)
+    out.push({
+      key: "voice",
+      label: "Voice (ElevenLabs)",
+      connected: provider?.tts.configured ?? false,
+      detail: provider?.tts.provider === "elevenlabs" ? "ElevenLabs" : null,
+      settingsPath: "/settings",
+    });
+    // Vault-managed secrets (Market Intel, webhooks, etc.)
+    for (const section of sections.sections) {
+      for (const secret of section.secrets) {
+        if (secret.key === "elevenlabs.api_key") continue; // covered by Voice card
+        out.push({
+          key: secret.key,
+          label: secret.label,
+          connected: secret.configured,
+          detail: null,
+          settingsPath: "/settings",
+        });
+      }
+    }
+    return out;
+  },
+};

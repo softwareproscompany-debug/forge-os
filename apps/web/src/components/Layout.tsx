@@ -10,8 +10,10 @@ const NAV = [
   { to: "/ops", label: "Mission Control", icon: "⬢" },
   { to: "/brain", label: "Brain", icon: "◉" },
   { to: "/campaigns", label: "Campaigns", icon: "✉" },
+  { to: "/pipeline", label: "Pipeline", icon: "⫿" },
   { to: "/autopilot", label: "Autopilot", icon: "✦" },
   { to: "/calendar", label: "Calendar", icon: "▦" },
+  { to: "/meetings", label: "Meetings", icon: "◷" },
   { to: "/approvals", label: "Approvals", icon: "✓" },
   { to: "/assets", label: "Assets", icon: "◫" },
   { to: "/analytics", label: "Analytics", icon: "◔" },
@@ -19,12 +21,24 @@ const NAV = [
   { to: "/outbox", label: "Outbox", icon: "⎋" },
   { to: "/onboarding", label: "Onboarding", icon: "⚙" },
   { to: "/interview", label: "Interview", icon: "❝" },
-  { to: "/templates", label: "Templates", icon: "▤" },
+  { to: "/knowledge", label: "Knowledge", icon: "▤" },
+  { to: "/templates", label: "Templates", icon: "▦" },
   { to: "/market-intel", label: "Market Intel", icon: "◈" },
   { to: "/alpha", label: "Alpha", icon: "⚡" },
   { to: "/draven", label: "Draven", icon: "⬢" },
   { to: "/swarm", label: "Swarm", icon: "✦" },
+  { to: "/integrations", label: "Integrations", icon: "⎔" },
   { to: "/settings", label: "Settings", icon: "🔑" },
+] as const;
+
+/** AI agent groups for the sidebar: blueprint categories mapped to the
+ * 12-agent Draven swarm. Labels only — all link to the Swarm page. */
+const AGENT_GROUPS = [
+  { label: "Ops Agent", agents: "Supervisor · Scheduler · Onboarder" },
+  { label: "Sales Agent", agents: "Outreach · Copywriter · Channel Adapter" },
+  { label: "Support Agent", agents: "Compliance · Brand Guardian · Asset Reviewer" },
+  { label: "Data Agent", agents: "Researcher · Analyst · Optimizer" },
+  { label: "Finance Agent", agents: "Analyst · Optimizer" },
 ] as const;
 
 /** Redirects to /login when there is no authenticated user. */
@@ -118,6 +132,32 @@ export function Layout() {
                 {item.icon}
               </span>
               {item.label}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="nav-section-label">AI AGENTS</div>
+        <nav className="nav" aria-label="AI agents">
+          {AGENT_GROUPS.map((g) => (
+            <NavLink
+              key={g.label}
+              to="/swarm"
+              onClick={() => setNavOpen(false)}
+              className="nav-link"
+              title={g.agents}
+            >
+              <span className="nav-icon" aria-hidden="true">
+                ◈
+              </span>
+              <span>
+                {g.label}
+                <span
+                  className="muted"
+                  style={{ display: "block", fontSize: 10, lineHeight: 1.3 }}
+                >
+                  {g.agents}
+                </span>
+              </span>
+              <span className="dot" aria-hidden="true" />
             </NavLink>
           ))}
         </nav>

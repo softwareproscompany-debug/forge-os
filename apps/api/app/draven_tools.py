@@ -1864,7 +1864,14 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         add("draven.campaign_launch", {"campaign_name": name} if name else {})
     if re.search(r"\bcreate\b.*\bcampaign\b|\bnew campaign\b", msg):
         name = _extract_name_fragment(message, ["create", "new"])
-        add("draven.campaign_create", {"name": name} if name else {})
+        # Default name for Viator campaigns if none extracted — never ask.
+        if not name and "viator" in msg:
+            city = _extract_viator_city_name(message)
+            name = f"Viator {city or 'Tours'} Campaign"
+        # Ultimate fallback: always provide a name so validation never fails.
+        if not name:
+            name = "Draven Campaign"
+        add("draven.campaign_create", {"name": name})
     # Drip/automation phrasing: "create a drip campaign", "set up a welcome
     # sequence", "build a nurture sequence" — all map to campaign_create.
     if re.search(
@@ -1875,11 +1882,14 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         name = _extract_name_fragment(
             message, ["create", "set", "setup", "set up", "build", "make", "new"]
         )
-        # Default name for Viator campaigns if none extracted.
+        # Default name for Viator campaigns if none extracted — never ask.
         if not name and "viator" in msg:
             city = _extract_viator_city_name(message)
             name = f"Viator {city or 'Tours'} Campaign"
-        add("draven.campaign_create", {"name": name} if name else {})
+        # Ultimate fallback: always provide a name so validation never fails.
+        if not name:
+            name = "Draven Campaign"
+        add("draven.campaign_create", {"name": name})
     if re.search(r"\bupdate\b.*\bcampaign\b|\bedit\b.*\bcampaign\b", msg):
         name = _extract_name_fragment(message, ["update", "edit"])
         add(

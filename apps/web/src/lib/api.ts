@@ -677,7 +677,47 @@ export const opsApi = {
       params: { limit },
     });
   },
+  brain(): Promise<BrainResponse> {
+    return apiFetch<BrainResponse>("/ops/brain");
+  },
 };
+
+/* ------------------------------------------------------------------ */
+/* Brain (Card 5 knowledge-graph views — one JSON for all views)       */
+/* ------------------------------------------------------------------ */
+
+export interface BrainNode {
+  id: string;
+  label: string;
+  detail: string | null;
+  at: string | null;
+}
+
+export interface BrainLink {
+  source: string;
+  target: string;
+  kind: "brand" | "asset" | "campaign" | "engagement";
+}
+
+export interface BrainLayer {
+  key: string;
+  label: string;
+  count: number;
+  nodes: BrainNode[];
+}
+
+export interface BrainTimelinePoint {
+  at: string;
+  kind: "sent" | "opened" | "clicked" | "converted" | "event";
+  label: string;
+}
+
+export interface BrainResponse {
+  as_of: string;
+  layers: BrainLayer[];
+  links: BrainLink[];
+  timeline: BrainTimelinePoint[];
+}
 
 /* ------------------------------------------------------------------ */
 /* Interview (Card 0 guided interview)                                 */

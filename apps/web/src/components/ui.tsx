@@ -89,7 +89,7 @@ const STATUS_CLASS: Record<string, string> = {
   unsubscribed: "badge-gray",
   email: "badge-blue",
   sms: "badge-purple",
-  social: "badge-teal",
+  social: "badge-blue",
 };
 
 export function Badge({ value }: { value: string }) {
@@ -233,23 +233,22 @@ export function StatCard({
   label,
   value,
   hint,
-  tone,
+  tone = "cyan",
   format = (n: number) => Math.round(n).toLocaleString("en-US"),
 }: {
   label: string;
   value: number;
   hint?: string;
-  /** Accent color for the top edge: "ember" (default) or "cyan". */
-  tone?: "ember" | "cyan";
+  /** Accent color for the top edge: "cyan" (default) or "magenta". */
+  tone?: "cyan" | "magenta";
   format?: (n: number) => string;
 }) {
   const animated = useCountUp(value);
+  const accent = tone === "magenta" ? "#ff2bd6" : "#00f5ff";
   return (
     <div
       className="card kpi stat-card"
-      style={
-        tone === "cyan" ? ({ "--stat-accent": "#22d3ee" } as React.CSSProperties) : undefined
-      }
+      style={{ "--stat-accent": accent } as React.CSSProperties}
     >
       <div className="kpi-label">{label}</div>
       <div className="kpi-value">{format(animated)}</div>

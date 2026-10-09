@@ -8,6 +8,7 @@ import { Spinner } from "./ui";
 const NAV = [
   { to: "/", label: "Dashboard", icon: "◈", end: true },
   { to: "/ops", label: "Mission Control", icon: "⬢" },
+  { to: "/brain", label: "Brain", icon: "◉" },
   { to: "/campaigns", label: "Campaigns", icon: "✉" },
   { to: "/autopilot", label: "Autopilot", icon: "✦" },
   { to: "/calendar", label: "Calendar", icon: "▦" },

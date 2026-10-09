@@ -1,34 +1,37 @@
-/* ForgeOS — futuristic mission-control theme, hand-written. No UI framework.
-   Palette matches docs/banner.svg: deep navy/charcoal base, ember-orange
-   primary, cyan secondary. Neon accents via --glow-* tokens. */
+/* ForgeOS — cyberpunk command-center theme, hand-written. No UI framework.
+   Palette: deep near-black base, neon cyan primary, magenta/blue/purple
+   accents. Restrained glow, fine grid, no rainbow gradients. */
 
 :root {
-  --bg: #0a0d16;
-  --bg-2: #10141f;
-  --bg-3: #161b29;
-  --border: #232b3f;
-  --border-glow: rgba(255, 140, 43, 0.35);
-  --text: #eef1f8;
-  --muted: #8b93a7;
-  --accent: #ff8c2b; /* ember orange — primary */
-  --accent-deep: #e67a1f;
-  --accent-ink: #241203; /* dark text on ember fills */
-  --accent-2: #22d3ee; /* cyan — secondary */
-  --accent-dim: rgba(255, 140, 43, 0.13);
-  --accent-2-dim: rgba(34, 211, 238, 0.1);
-  --glow: 0 0 22px rgba(255, 140, 43, 0.28);
-  --glow-soft: 0 0 12px rgba(255, 140, 43, 0.16);
-  --glow-cyan: 0 0 22px rgba(34, 211, 238, 0.22);
-  --green: #34d399;
-  --amber: #fbbf24;
-  --red: #f87171;
-  --blue: #60a5fa;
-  --purple: #c084fc;
-  --teal: #2dd4bf;
+  --bg: #070910;
+  --bg-2: #0c1020;
+  --bg-3: #11182a;
+  --border: rgba(0, 245, 255, 0.14);
+  --border-strong: rgba(0, 245, 255, 0.32);
+  --border-glow: rgba(0, 245, 255, 0.4);
+  --text: #f3f6ff;
+  --muted: #9aa8c7;
+  --accent: #00f5ff; /* neon cyan — primary interactive */
+  --accent-deep: #397bff; /* electric blue */
+  --accent-ink: #03252b; /* dark text on cyan fills */
+  --accent-2: #ff2bd6; /* neon magenta — selected highlights */
+  --accent-dim: rgba(0, 245, 255, 0.12);
+  --accent-2-dim: rgba(255, 43, 214, 0.1);
+  --glow: 0 0 22px rgba(0, 245, 255, 0.3);
+  --glow-soft: 0 0 12px rgba(0, 245, 255, 0.16);
+  --glow-magenta: 0 0 22px rgba(255, 43, 214, 0.28);
+  --glow-magenta-soft: 0 0 12px rgba(255, 43, 214, 0.16);
+  --green: #39ff88;
+  --amber: #ffb547;
+  --red: #ff426d;
+  --blue: #397bff;
+  --purple: #9d4edd;
   --radius: 10px;
   --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     sans-serif;
-  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --heading: "Space Grotesk", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", Menlo,
+    Consolas, monospace;
 }
 
 * {
@@ -45,12 +48,17 @@ body {
   background:
     radial-gradient(
       900px 380px at 12% -120px,
-      rgba(255, 140, 43, 0.07),
+      rgba(0, 245, 255, 0.06),
       transparent 70%
     ),
     radial-gradient(
       800px 360px at 88% -100px,
-      rgba(34, 211, 238, 0.05),
+      rgba(255, 43, 214, 0.05),
+      transparent 70%
+    ),
+    radial-gradient(
+      700px 480px at 50% 120%,
+      rgba(157, 78, 221, 0.05),
       transparent 70%
     ),
     var(--bg);
@@ -61,11 +69,29 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Fine low-contrast grid, faded toward the bottom of the viewport. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(0, 245, 255, 0.028) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 245, 255, 0.028) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 25%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 25%, transparent 100%);
+}
+
 #root {
   min-height: 100vh;
+  position: relative;
+  z-index: 1;
 }
 
 h1 {
+  font-family: var(--heading);
   font-size: 22px;
   margin: 0;
   font-weight: 700;
@@ -73,9 +99,10 @@ h1 {
 }
 
 h2 {
+  font-family: var(--heading);
   font-size: 15px;
   margin: 0;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 h3 {
@@ -88,7 +115,7 @@ h3 {
 }
 
 a {
-  color: var(--accent-2);
+  color: var(--accent);
   text-decoration: none;
 }
 
@@ -131,7 +158,7 @@ code {
   padding: 24px;
   background: radial-gradient(
       800px 400px at 50% -100px,
-      rgba(255, 140, 43, 0.12),
+      rgba(0, 245, 255, 0.1),
       transparent
     ),
     var(--bg);
@@ -177,18 +204,20 @@ code {
   width: 34px;
   height: 34px;
   border-radius: 9px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   display: flex;
   align-items: center;
   justify-content: center;
   font-weight: 800;
   font-size: 18px;
+  font-family: var(--heading);
   color: var(--accent-ink);
   box-shadow: var(--glow-soft);
 }
 
 .brand-name {
-  font-weight: 750;
+  font-family: var(--heading);
+  font-weight: 700;
   font-size: 17px;
   letter-spacing: -0.01em;
 }
@@ -241,9 +270,9 @@ code {
 }
 
 .nav-link-active {
-  background: var(--accent-dim);
+  background: var(--accent-2-dim);
   color: var(--text);
-  box-shadow: inset 2px 0 0 var(--accent), var(--glow-soft);
+  box-shadow: inset 2px 0 0 var(--accent-2), var(--glow-magenta-soft);
 }
 
 .nav-icon {
@@ -270,7 +299,7 @@ code {
   justify-content: space-between;
   padding: 14px 28px;
   border-bottom: 1px solid var(--border);
-  background: rgba(10, 13, 22, 0.82);
+  background: rgba(7, 9, 16, 0.85);
   position: sticky;
   top: 0;
   z-index: 10;
@@ -373,6 +402,8 @@ button.card-link {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
 }
 
 .kpi-value {
@@ -494,14 +525,14 @@ button.card-link {
 }
 
 .btn-danger {
-  background: #7f1d1d;
-  border-color: #991b1b;
-  color: #fecaca;
+  background: #5c1025;
+  border-color: #8a1a38;
+  color: #ffd7e0;
 }
 
 .btn-danger-outline {
   background: transparent;
-  border-color: #7f1d1d;
+  border-color: #8a1a38;
   color: var(--red);
 }
 
@@ -576,7 +607,7 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(255, 140, 43, 0.28), var(--glow-soft);
+  box-shadow: 0 0 0 2px rgba(0, 245, 255, 0.25), var(--glow-soft);
 }
 
 textarea {
@@ -695,33 +726,35 @@ input[type="checkbox"] {
 }
 
 .badge-gray {
-  background: rgba(139, 147, 167, 0.16);
+  background: rgba(154, 168, 199, 0.16);
   color: #aab2c5;
 }
 .badge-amber {
-  background: rgba(251, 191, 36, 0.14);
+  background: rgba(255, 181, 71, 0.14);
   color: var(--amber);
 }
 .badge-green {
-  background: rgba(52, 211, 153, 0.14);
+  background: rgba(57, 255, 136, 0.12);
   color: var(--green);
 }
 .badge-red {
-  background: rgba(248, 113, 113, 0.14);
+  background: rgba(255, 66, 109, 0.14);
   color: var(--red);
 }
 .badge-blue {
-  background: rgba(96, 165, 250, 0.14);
-  color: var(--blue);
+  background: rgba(57, 123, 255, 0.16);
+  color: #7ea2ff;
 }
 .badge-purple {
-  background: rgba(192, 132, 252, 0.14);
-  color: var(--purple);
+  background: rgba(157, 78, 221, 0.16);
+  color: #c39bf5;
 }
-.badge-teal {
-  background: rgba(45, 212, 191, 0.14);
-  color: var(--teal);
+.badge-cyan {
+  background: var(--accent-dim);
+  color: var(--accent);
+  box-shadow: var(--glow-soft);
 }
+/* Deprecated alias — kept so older markup keeps working. */
 .badge-ember {
   background: var(--accent-dim);
   color: var(--accent);
@@ -741,15 +774,15 @@ input[type="checkbox"] {
 }
 
 .alert-error {
-  background: rgba(248, 113, 113, 0.1);
-  border: 1px solid rgba(248, 113, 113, 0.35);
-  color: #fecaca;
+  background: rgba(255, 66, 109, 0.1);
+  border: 1px solid rgba(255, 66, 109, 0.35);
+  color: #ffd7e0;
 }
 
 .alert-info {
-  background: rgba(96, 165, 250, 0.1);
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  color: #bfdbfe;
+  background: rgba(57, 123, 255, 0.1);
+  border: 1px solid rgba(57, 123, 255, 0.35);
+  color: #c3d6ff;
 }
 
 .alert-detail {
@@ -1133,8 +1166,8 @@ input[type="checkbox"] {
 /* ---------------- Keyframes ---------------- */
 
 @keyframes ops-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
-  50% { opacity: 0.75; box-shadow: 0 0 0 7px rgba(52, 211, 153, 0); }
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(57, 255, 136, 0.55); }
+  50% { opacity: 0.75; box-shadow: 0 0 0 7px rgba(57, 255, 136, 0); }
 }
 
 @keyframes ops-flow {
@@ -1252,6 +1285,7 @@ input[type="checkbox"] {
   font-size: 11px;
   color: var(--muted);
   letter-spacing: 0.04em;
+  font-family: var(--mono);
 }
 
 .data-stamp::before {
@@ -1263,7 +1297,7 @@ input[type="checkbox"] {
 .glow-card {
   border-color: var(--border-glow);
   box-shadow: var(--glow-soft);
-  background: linear-gradient(180deg, rgba(255, 140, 43, 0.04), var(--bg-2) 40%);
+  background: linear-gradient(180deg, rgba(0, 245, 255, 0.04), var(--bg-2) 40%);
 }
 
 /* ================================================================
@@ -1296,7 +1330,8 @@ input[type="checkbox"] {
 
 .ops-title {
   font-size: 24px;
-  font-weight: 800;
+  font-weight: 700;
+  font-family: var(--heading);
   letter-spacing: 0.02em;
   text-transform: uppercase;
   background: linear-gradient(90deg, #fff, var(--accent));
@@ -1348,7 +1383,8 @@ input[type="checkbox"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-weight: 800;
+  font-weight: 700;
+  font-family: var(--heading);
   font-size: 15px;
   color: var(--accent-ink);
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
@@ -1428,9 +1464,9 @@ input[type="checkbox"] {
   flex-shrink: 0;
 }
 
-.ops-feed-kind-generation { background: var(--accent-2); box-shadow: var(--glow-cyan); }
-.ops-feed-kind-send { background: var(--accent); box-shadow: var(--glow-soft); }
-.ops-feed-kind-event { background: var(--green); box-shadow: 0 0 10px rgba(52, 211, 153, 0.35); }
+.ops-feed-kind-generation { background: var(--accent); box-shadow: var(--glow-soft); }
+.ops-feed-kind-send { background: var(--accent-2); box-shadow: var(--glow-magenta-soft); }
+.ops-feed-kind-event { background: var(--green); box-shadow: 0 0 10px rgba(57, 255, 136, 0.35); }
 
 .ops-feed-title {
   font-weight: 600;
@@ -1554,4 +1590,193 @@ input[type="checkbox"] {
   flex-direction: column;
   gap: 8px;
   align-items: flex-start;
+}
+
+/* ================================================================
+   Brain views (Card 5) — knowledge-graph visualizations
+   Pure SVG/CSS. Every view reads the same /ops/brain JSON.
+   ================================================================ */
+
+.brain-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.brain-tab {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.brain-tab:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.brain-tab-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  box-shadow: var(--glow-soft);
+  background: var(--accent-dim);
+}
+
+.brain-view {
+  animation: ops-slide-in 0.3s ease-out;
+}
+
+.brain-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.brain-node-label {
+  fill: var(--text);
+  font-size: 11px;
+  font-family: var(--font);
+}
+
+.brain-meta-label {
+  fill: var(--muted);
+  font-size: 10px;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.brain-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.brain-areas {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.brain-area-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brain-area-label {
+  width: 130px;
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--mono);
+}
+
+.brain-area-track {
+  flex: 1;
+  height: 44px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.brain-area-fill {
+  height: 100%;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  font-family: var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+  transition: width 0.6s ease;
+}
+
+.brain-area-count {
+  width: 60px;
+  flex-shrink: 0;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.brain-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.brain-chip {
+  font-size: 11px;
+  font-family: var(--mono);
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- Loading skeleton ---------------- */
+
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-3);
+  border-radius: 8px;
+  min-height: 18px;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(0, 245, 255, 0.08),
+    transparent
+  );
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+/* ---------------- Reduced motion ---------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .ops-link { animation: none; }
+  .skeleton::after { animation: none; }
+  .brain-area-fill { transition: none; }
 }

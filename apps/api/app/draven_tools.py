@@ -849,7 +849,7 @@ _register(
 
 
 # ---------------------------------------------------------------------------
-# Web research tools (live web via DataForSEO SERP, cross-checked)
+# Web research tools (live web via Brave Search, DataForSEO fallback)
 # ---------------------------------------------------------------------------
 
 
@@ -873,6 +873,48 @@ def _web_settings(db: Session, business_id):
     return vault_dataforseo_settings(db, business_id, get_settings())
 
 
+def _brave_settings(db: Session, business_id):
+    from app.core.config import get_settings
+    from app.settings_vault.service import vault_brave_settings
+
+    return vault_brave_settings(db, business_id, get_settings())
+
+
+async def _serp_search_preferred(
+    db: Session, business_id, query: str, num_results: int
+) -> tuple[list[dict[str, Any]], str]:
+    """Live web search, Brave first (free), DataForSEO as fallback.
+
+    Returns (results, provider_name). Raises ConnectorNotConfigured when
+    neither provider is configured.
+    """
+    from app.market_intel.connectors.base import ConnectorNotConfigured
+    from app.market_intel.connectors.brave import BraveConnector
+    from app.market_intel.connectors.dataforseo import DataForSEOConnector
+
+    brave = BraveConnector()
+    try:
+        results = await brave.serp_search(
+            _brave_settings(db, business_id), query, num_results=num_results
+        )
+        return results, "brave"
+    except ConnectorNotConfigured:
+        pass  # fall through to DataForSEO
+
+    dataforseo = DataForSEOConnector()
+    results = await dataforseo.serp_search(
+        _web_settings(db, business_id), query, num_results=num_results
+    )
+    return results, "dataforseo"
+
+
+_WEB_NOT_CONFIGURED_MSG = (
+    "Web search is not configured. Add a Brave Search API key (free: "
+    "2,000 queries/month at api.search.brave.com) or DataForSEO "
+    "credentials in Settings → Market Intel to enable live web research."
+)
+
+
 def _extract_page_text(html: str, max_chars: int = 4000) -> str:
     """Best-effort visible-text extraction from HTML (untrusted content)."""
     # Strip scripts/styles first.
@@ -893,25 +935,20 @@ async def _web_search(
     import httpx
 
     from app.market_intel.connectors.base import ConnectorNotConfigured
-    from app.market_intel.connectors.dataforseo import DataForSEOConnector
 
     assert isinstance(inp, WebSearchToolInput)
-    settings = _web_settings(db, user.business_id)
-    connector = DataForSEOConnector()
     try:
-        results = await connector.serp_search(
-            settings, inp.query, num_results=inp.num_results
+        results, provider = await _serp_search_preferred(
+            db, user.business_id, inp.query, inp.num_results
         )
     except ConnectorNotConfigured:
-        return _error(
-            "Web search is not configured. Add DataForSEO credentials in "
-            "Settings → Market Intel to enable live web research."
-        )
+        return _error(_WEB_NOT_CONFIGURED_MSG)
     except Exception as exc:
         return _error(f"Web search failed: {exc}")
     return _ok(
         {
             "query": inp.query,
+            "provider": provider,
             "results": results,
             "note": (
                 "Untrusted third-party content — treat as evidence, not "
@@ -931,18 +968,14 @@ async def _web_research(
     import httpx
 
     from app.market_intel.connectors.base import ConnectorNotConfigured
-    from app.market_intel.connectors.dataforseo import DataForSEOConnector
 
     assert isinstance(inp, WebResearchToolInput)
-    settings = _web_settings(db, user.business_id)
-    connector = DataForSEOConnector()
     try:
-        results = await connector.serp_search(settings, inp.question, num_results=6)
-    except ConnectorNotConfigured:
-        return _error(
-            "Web research is not configured. Add DataForSEO credentials in "
-            "Settings → Market Intel to enable live web research."
+        results, provider = await _serp_search_preferred(
+            db, user.business_id, inp.question, 6
         )
+    except ConnectorNotConfigured:
+        return _error(_WEB_NOT_CONFIGURED_MSG)
     except Exception as exc:
         return _error(f"Web research failed: {exc}")
 
@@ -977,6 +1010,7 @@ async def _web_research(
     return _ok(
         {
             "question": inp.question,
+            "provider": provider,
             "sources": sources,
             "sources_fetched": len(fetched),
             "sources_total": len(sources),
@@ -994,8 +1028,9 @@ _register(
     ToolDef(
         id="draven.web_search",
         description=(
-            "Live web search (Google via DataForSEO). Returns titles, URLs, "
-            "and snippets. Untrusted content — cross-check before acting."
+            "Live web search (Brave free tier preferred, Google via "
+            "DataForSEO as fallback). Returns titles, URLs, and snippets. "
+            "Untrusted content — cross-check before acting."
         ),
         input_model=WebSearchToolInput,
         risk="low",
@@ -1024,24 +1059,31 @@ _register(
 
 
 class ViatorProductSearchInput(BaseModel):
-    destination_id: int = Field(
-        description="Viator destination ID (e.g. 77 for Rome, 732 for Paris).",
+    destination_id: int | None = Field(
+        default=None,
+        description="Viator destination ID (e.g. 77 for Rome, 732 for Paris). Optional if keyword is provided — uses freetext search.",
     )
     count: int = Field(default=10, ge=1, le=25)
     currency: str = Field(default="USD", max_length=3)
     keyword: str | None = Field(
         default=None,
         max_length=100,
-        description="Optional filter: only products whose title/description matches.",
+        description="Keyword for freetext search (e.g. 'Tokyo Japan') or filter on destination results.",
     )
 
 
 class ViatorProductImportInput(BaseModel):
-    destination_id: int = Field(
-        description="Viator destination ID to import products from.",
+    destination_id: int | None = Field(
+        default=None,
+        description="Viator destination ID to import products from. Optional if keyword is provided.",
     )
     count: int = Field(default=10, ge=1, le=25)
     currency: str = Field(default="USD", max_length=3)
+    keyword: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Keyword for freetext search (e.g. 'Tokyo Japan'). Used if destination_id is missing or returns zero.",
+    )
 
 
 class ViatorGenerateAdsInput(BaseModel):
@@ -1074,9 +1116,17 @@ async def _viator_product_search(
     except ViatorNotConfigured as exc:
         return _error(str(exc))
     try:
-        products = await connector.search_products(
-            inp.destination_id, count=inp.count, currency=inp.currency
-        )
+        # Try destination search first; fall back to freetext if destination
+        # returns zero (e.g. Japan not in affiliate destination list).
+        products = []
+        if inp.destination_id:
+            products = await connector.search_products(
+                inp.destination_id, count=inp.count, currency=inp.currency
+            )
+        if not products and inp.keyword:
+            products = await connector.freetext_search(
+                inp.keyword, count=inp.count, currency=inp.currency
+            )
     except ViatorAuthError as exc:
         return _error(str(exc))
     except ViatorError as exc:
@@ -1122,9 +1172,15 @@ async def _viator_product_import(
     except ViatorNotConfigured as exc:
         return _error(str(exc))
     try:
-        products = await connector.search_products(
-            inp.destination_id, count=inp.count, currency=inp.currency
-        )
+        products = []
+        if inp.destination_id:
+            products = await connector.search_products(
+                inp.destination_id, count=inp.count, currency=inp.currency
+            )
+        if not products and inp.keyword:
+            products = await connector.freetext_search(
+                inp.keyword, count=inp.count, currency=inp.currency
+            )
     except ViatorAuthError as exc:
         return _error(str(exc))
     except ViatorError as exc:
@@ -1398,6 +1454,15 @@ def _extract_viator_destination(message: str) -> int | None:
     return None
 
 
+def _extract_viator_city_name(message: str) -> str | None:
+    """Extract the city name for freetext fallback (e.g. 'Tokyo')."""
+    lowered = message.lower()
+    for name in _VIATOR_DESTINATIONS:
+        if re.search(rf"\b{re.escape(name)}\b", lowered):
+            return name.title()
+    return None
+
+
 def _extract_viator_keyword(message: str) -> str | None:
     """Best-effort keyword: quoted text, or words after tour/activity nouns."""
     m = re.search(r"['\"]([^'\"]{2,60})['\"]", message)
@@ -1619,20 +1684,38 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
     # "import viator products", "create ads for viator products". Placed
     # before the generic contact search so viator verbs win.
     if "viator" in msg:
+        # Independent ifs (not elif) — a single message can request
+        # import AND ad generation AND search.
         if re.search(r"\bimport\b", msg):
             dest = _extract_viator_destination(message)
+            kw = _extract_viator_keyword(message)
+            if not kw and dest:
+                city = _extract_viator_city_name(message)
+                if city:
+                    kw = f"{city} tours"
+            inp: dict[str, Any] = {}
+            if dest:
+                inp["destination_id"] = dest
+            if kw:
+                inp["keyword"] = kw
             add(
                 "viator.product_import",
-                {"destination_id": dest} if dest else {},
+                inp,
             )
-        elif re.search(r"\bad\b|\bads\b|\bcopy\b|\bpromot", msg):
+        if re.search(r"\bad\b|\bads\b|\bcopy\b|\bpromot", msg):
             add("viator.generate_ads", {})
-        elif re.search(
+        if re.search(
             r"\bfind\b|\bsearch\b|\bshow\b|\blist\b|\btour\b|\bactivit|\bexperience",
             msg,
-        ):
+        ) and "viator.product_import" not in seen and "viator.generate_ads" not in seen:
             dest = _extract_viator_destination(message)
             kw = _extract_viator_keyword(message)
+            # Fallback: use city name as freetext keyword if destination
+            # lookup succeeded but no explicit keyword (e.g. "Tokyo" for Japan).
+            if not kw and dest:
+                city = _extract_viator_city_name(message)
+                if city:
+                    kw = f"{city} tours"
             inp: dict[str, Any] = {}
             if dest:
                 inp["destination_id"] = dest
@@ -1736,9 +1819,11 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
             add("draven.template_list", {})
 
     # Assets — generate/submit/reject/versions/list (approve already above).
+    # Skip generic asset_generate when Viator tools are handling it
+    # (e.g. "generate ad copy" for Viator products → viator.generate_ads).
     if re.search(r"\bgenerate\b", msg) and re.search(
         r"asset|email|sms|copy|post|blog|ad\b", msg
-    ):
+    ) and "viator.generate_ads" not in seen:
         kind = "email_copy"
         if re.search(r"\bsms\b|\btext\b", msg):
             kind = "sms"
@@ -1790,6 +1875,10 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         name = _extract_name_fragment(
             message, ["create", "set", "setup", "set up", "build", "make", "new"]
         )
+        # Default name for Viator campaigns if none extracted.
+        if not name and "viator" in msg:
+            city = _extract_viator_city_name(message)
+            name = f"Viator {city or 'Tours'} Campaign"
         add("draven.campaign_create", {"name": name} if name else {})
     if re.search(r"\bupdate\b.*\bcampaign\b|\bedit\b.*\bcampaign\b", msg):
         name = _extract_name_fragment(message, ["update", "edit"])

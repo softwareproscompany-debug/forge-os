@@ -791,3 +791,149 @@ export const interviewApi = {
     );
   },
 };
+
+/* ------------------------------------------------------------------ */
+/* Affiliates — we promote affiliate offers, we earn commissions        */
+/* ------------------------------------------------------------------ */
+
+export interface AffiliateProgram {
+  id: string;
+  business_id: string;
+  name: string;
+  network: string;
+  website_url: string | null;
+  default_commission_pct: number;
+  cookie_days: number | null;
+  status: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface AffiliateProgramInput {
+  name: string;
+  network?: string;
+  website_url?: string | null;
+  default_commission_pct?: number;
+  cookie_days?: number | null;
+  status?: string;
+  notes?: string | null;
+}
+
+export interface AffiliateLink {
+  id: string;
+  business_id: string;
+  program_id: string;
+  label: string;
+  slug: string;
+  destination_url: string;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface AffiliateLinkInput {
+  program_id: string;
+  label: string;
+  slug: string;
+  destination_url: string;
+  utm_source?: string | null;
+  utm_medium?: string | null;
+  utm_campaign?: string | null;
+  is_active?: boolean;
+}
+
+export interface AffiliateTotals {
+  clicks: number;
+  conversions: number;
+  conversion_rate: number;
+  earnings_usd: number;
+}
+
+export interface AffiliateLinkStats {
+  link_id: string;
+  label: string;
+  program_name: string;
+  clicks: number;
+  conversions: number;
+  conversion_rate: number;
+  earnings_usd: number;
+}
+
+export interface AffiliateProgramStats {
+  program_id: string;
+  program_name: string;
+  clicks: number;
+  conversions: number;
+  conversion_rate: number;
+  earnings_usd: number;
+}
+
+export interface AffiliateEarnings {
+  days: number;
+  totals: AffiliateTotals;
+  per_program: AffiliateProgramStats[];
+  per_link: AffiliateLinkStats[];
+}
+
+export const affiliatesApi = {
+  listPrograms(): Promise<AffiliateProgram[]> {
+    return apiFetch<unknown>("/affiliates/programs").then(
+      asItems<AffiliateProgram>,
+    );
+  },
+  createProgram(input: AffiliateProgramInput): Promise<AffiliateProgram> {
+    return apiFetch<AffiliateProgram>("/affiliates/programs", {
+      method: "POST",
+      body: input,
+    });
+  },
+  updateProgram(
+    id: string,
+    input: Partial<AffiliateProgramInput>,
+  ): Promise<AffiliateProgram> {
+    return apiFetch<AffiliateProgram>(`/affiliates/programs/${id}`, {
+      method: "PATCH",
+      body: input,
+    });
+  },
+  deleteProgram(id: string): Promise<void> {
+    return apiFetch<void>(`/affiliates/programs/${id}`, { method: "DELETE" });
+  },
+  listLinks(programId?: string): Promise<AffiliateLink[]> {
+    return apiFetch<unknown>("/affiliates/links", {
+      params: programId ? { program_id: programId } : undefined,
+    }).then(asItems<AffiliateLink>);
+  },
+  createLink(input: AffiliateLinkInput): Promise<AffiliateLink> {
+    return apiFetch<AffiliateLink>("/affiliates/links", {
+      method: "POST",
+      body: input,
+    });
+  },
+  updateLink(
+    id: string,
+    input: Partial<AffiliateLinkInput>,
+  ): Promise<AffiliateLink> {
+    return apiFetch<AffiliateLink>(`/affiliates/links/${id}`, {
+      method: "PATCH",
+      body: input,
+    });
+  },
+  deleteLink(id: string): Promise<void> {
+    return apiFetch<void>(`/affiliates/links/${id}`, { method: "DELETE" });
+  },
+  earnings(days = 30): Promise<AffiliateEarnings> {
+    return apiFetch<AffiliateEarnings>("/affiliates/earnings", {
+      params: { days },
+    });
+  },
+  /** Public short-link URL for a slug (served by GET /r/{slug}, no auth). */
+  shortUrl(slug: string): string {
+    const base = (
+      (import.meta.env.VITE_API_URL as string | undefined) || "http://localhost:8000"
+    ).replace(/\/+$/, "");
+    return `${base}/r/${slug}`;
+  },
+};

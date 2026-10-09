@@ -11,7 +11,7 @@ from app.draven_tools import (
     Business, Campaign, CampaignRefInput, CampaignStatus, Contact, EmptyInput,
     Field, Literal, MarketOpportunity, Session, ToolDef, User,
     _approval_required, _error, _iso, _ok, _register, _resolve_asset,
-    _resolve_campaign, datetime, field, func, timedelta, timezone, uuid,
+    _resolve_campaign, datetime, field, func, or_, timedelta, timezone, uuid,
 )
 
 # ---------------------------------------------------------------------------
@@ -594,6 +594,7 @@ from forge_db.models import (  # noqa: E402
     CampaignStep,
     Channel,
     ContentPlan,
+    EnrollmentStatus,
     Event,
     InterviewSession,
     InterviewStatus,
@@ -748,12 +749,27 @@ class AssetRejectInput(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class CampaignStepIn(BaseModel):
+    channel: Literal["email", "sms", "social"]
+    position: int | None = None
+    template_id: str | None = None
+    asset_id: str | None = None
+    # Resolve by (case-insensitive) name fragment when no id is given.
+    template_name: str | None = Field(default=None, max_length=255)
+    asset_name: str | None = Field(default=None, max_length=255)
+    delay_hours: int = Field(default=24, ge=0, le=720)
+    trigger_event: str | None = Field(default=None, max_length=128)
+
+
 class CampaignCreateInput(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     autopilot: bool = False
     starts_at: datetime | None = None
     timezone: str = Field(default="UTC", max_length=64)
+    # Optional drip sequence created atomically with the campaign.
+    # Omit (None) for a bare campaign; an explicit empty list is rejected.
+    steps: list[CampaignStepIn] | None = Field(default=None, max_length=25)
 
 
 class CampaignUpdateInput(BaseModel):
@@ -765,15 +781,6 @@ class CampaignUpdateInput(BaseModel):
     timezone: str | None = Field(default=None, max_length=64)
     # NOTE: status is deliberately not updatable here — launches and pauses
     # go through the dedicated (approval-gated) tools.
-
-
-class CampaignStepIn(BaseModel):
-    channel: Literal["email", "sms", "social"]
-    position: int | None = None
-    template_id: str | None = None
-    asset_id: str | None = None
-    delay_hours: int = Field(default=24, ge=0)
-    trigger_event: str | None = Field(default=None, max_length=128)
 
 
 class CampaignStepsAddInput(BaseModel):
@@ -799,6 +806,20 @@ class CampaignEnrollmentsInput(BaseModel):
     campaign_id: str | None = None
     campaign_name: str | None = None
     limit: int = Field(default=20, ge=1, le=50)
+
+
+class CampaignEnrollInput(BaseModel):
+    """Enroll contacts into a campaign.
+
+    Identify contacts by explicit ids, by a search query (name/email/phone
+    fragment, same matching as contacts search), or both. Already-enrolled
+    and unsubscribed contacts are skipped and reported, never duplicated.
+    """
+
+    campaign_id: str | None = None
+    campaign_name: str | None = None
+    contact_ids: list[str] | None = Field(default=None, max_length=200)
+    contact_query: str | None = Field(default=None, max_length=200)
 
 
 class AutopilotUpdateInput(BaseModel):
@@ -1654,9 +1675,108 @@ async def _campaign_get(db: Session, user: User, inp: CampaignRefInput) -> dict[
     )
 
 
+def _resolve_template_by_name(
+    db: Session, business_id: uuid.UUID, fragment: str
+) -> Template | None:
+    return (
+        db.query(Template)
+        .filter(
+            Template.business_id == business_id,
+            Template.name.ilike(f"%{fragment}%"),
+        )
+        .first()
+    )
+
+
+def _resolve_asset_by_name(
+    db: Session, business_id: uuid.UUID, fragment: str
+) -> Asset | None:
+    return (
+        db.query(Asset)
+        .filter(
+            Asset.business_id == business_id,
+            Asset.title.ilike(f"%{fragment}%"),
+        )
+        .first()
+    )
+
+
+def _describe_sequence(steps: list[CampaignStep]) -> str:
+    """Human summary: 'Day 0: welcome email → Day 3: follow-up SMS → …'."""
+    parts: list[str] = []
+    elapsed = 0
+    for s in sorted(steps, key=lambda x: x.position):
+        elapsed += s.delay_hours or 0
+        day = elapsed // 24
+        label = s.channel.value
+        if s.template_id or s.asset_id:
+            label += " (content attached)"
+        parts.append(f"Day {day}: {label}")
+    return " → ".join(parts)
+
+
+def _build_drip_steps(
+    db: Session,
+    user: User,
+    campaign: Campaign,
+    steps_in: list[CampaignStepIn],
+    start_position: int,
+) -> list[CampaignStep]:
+    """Validate + create ordered drip steps. Raises ValueError on any problem.
+
+    Template/asset references may be ids or (case-insensitive) name
+    fragments; both are ownership-checked against the caller's business.
+    Positions auto-assign from ``start_position`` unless explicitly given.
+    """
+    created: list[CampaignStep] = []
+    for i, item in enumerate(steps_in):
+        template_id = None
+        if item.template_id is not None:
+            if _owned(db, user, Template, item.template_id) is None:
+                raise ValueError(
+                    f"template not found in your business: {item.template_id}"
+                )
+            template_id = uuid.UUID(str(item.template_id))
+        elif item.template_name:
+            tpl = _resolve_template_by_name(db, user.business_id, item.template_name)
+            if tpl is None:
+                raise ValueError(
+                    f"template not found in your business: '{item.template_name}'"
+                )
+            template_id = tpl.id
+        asset_id = None
+        if item.asset_id is not None:
+            if _owned(db, user, Asset, item.asset_id) is None:
+                raise ValueError(
+                    f"asset not found in your business: {item.asset_id}"
+                )
+            asset_id = uuid.UUID(str(item.asset_id))
+        elif item.asset_name:
+            asset = _resolve_asset_by_name(db, user.business_id, item.asset_name)
+            if asset is None:
+                raise ValueError(
+                    f"asset not found in your business: '{item.asset_name}'"
+                )
+            asset_id = asset.id
+        step = CampaignStep(
+            campaign_id=campaign.id,
+            position=item.position if item.position is not None else start_position + i,
+            channel=Channel(item.channel),
+            template_id=template_id,
+            asset_id=asset_id,
+            delay_hours=item.delay_hours,
+            trigger_event=item.trigger_event,
+        )
+        db.add(step)
+        created.append(step)
+    return created
+
+
 async def _campaign_create(
     db: Session, user: User, inp: CampaignCreateInput
 ) -> dict[str, Any]:
+    if inp.steps is not None and len(inp.steps) == 0:
+        return _error("steps must contain at least 1 step, or be omitted entirely")
     campaign = Campaign(
         business_id=user.business_id,
         created_by=user.id,
@@ -1668,14 +1788,26 @@ async def _campaign_create(
         status=CampaignStatus.draft,
     )
     db.add(campaign)
+    db.flush()  # id needed for the steps below
+    steps: list[CampaignStep] = []
+    if inp.steps:
+        try:
+            steps = _build_drip_steps(db, user, campaign, inp.steps, 0)
+        except ValueError as exc:
+            db.rollback()
+            return _error(str(exc))
     db.commit()
     db.refresh(campaign)
-    return _ok(
-        {
-            "campaign": _s_campaign(campaign),
-            "note": "created as draft — add steps, then launch when ready",
-        }
-    )
+    for s in steps:
+        db.refresh(s)
+    out: dict[str, Any] = {
+        "campaign": _s_campaign(campaign),
+        "note": "created as draft — launch requires human approval; nothing will send until then",
+    }
+    if steps:
+        out["steps"] = [_s_step(s) for s in steps]
+        out["sequence_summary"] = _describe_sequence(steps)
+    return _ok(out)
 
 
 async def _campaign_update(
@@ -1718,34 +1850,23 @@ async def _campaign_steps_add(
     )
     if campaign is None:
         return _error("campaign not found in your business")
+    if campaign.status != CampaignStatus.draft:
+        return _error(
+            f"campaign '{campaign.name}' is {campaign.status.value} — "
+            "steps can only be added to draft campaigns"
+        )
     max_position = (
         db.query(func.coalesce(func.max(CampaignStep.position), -1))
         .filter(CampaignStep.campaign_id == campaign.id)
         .scalar()
     )
-    created: list[CampaignStep] = []
-    for i, item in enumerate(inp.steps):
-        template_id = None
-        if item.template_id is not None:
-            if _owned(db, user, Template, item.template_id) is None:
-                return _error(f"template not found in your business: {item.template_id}")
-            template_id = uuid.UUID(str(item.template_id))
-        asset_id = None
-        if item.asset_id is not None:
-            if _owned(db, user, Asset, item.asset_id) is None:
-                return _error(f"asset not found in your business: {item.asset_id}")
-            asset_id = uuid.UUID(str(item.asset_id))
-        step = CampaignStep(
-            campaign_id=campaign.id,
-            position=item.position if item.position is not None else max_position + 1 + i,
-            channel=Channel(item.channel),
-            template_id=template_id,
-            asset_id=asset_id,
-            delay_hours=item.delay_hours,
-            trigger_event=item.trigger_event,
+    try:
+        created = _build_drip_steps(
+            db, user, campaign, inp.steps, (max_position or 0) + 1
         )
-        db.add(step)
-        created.append(step)
+    except ValueError as exc:
+        db.rollback()
+        return _error(str(exc))
     db.commit()
     for step in created:
         db.refresh(step)
@@ -1754,6 +1875,7 @@ async def _campaign_steps_add(
             "campaign_id": str(campaign.id),
             "added": len(created),
             "steps": [_s_step(s) for s in created],
+            "sequence_summary": _describe_sequence(created),
         }
     )
 
@@ -1842,15 +1964,25 @@ async def _campaign_launch(
         .scalar()
         or 0
     )
+    enrollment_count = (
+        db.query(func.count(CampaignEnrollment.id))
+        .filter(
+            CampaignEnrollment.campaign_id == campaign.id,
+            CampaignEnrollment.status == EnrollmentStatus.active,
+        )
+        .scalar()
+        or 0
+    )
     return _approval_required(
         action="campaign.launch",
         description=(
             f"Launch campaign '{campaign.name}' ({campaign.id}) with "
-            f"{step_count} step{'s' if step_count != 1 else ''}. Launching "
-            "sets it running: contacts enroll and real messages start "
-            "sending on the campaign schedule (quiet hours and the daily "
-            "send cap still apply). All asset-bearing steps reference "
-            "approved assets."
+            f"{step_count} step{'s' if step_count != 1 else ''} and "
+            f"{enrollment_count} active enrollment{'s' if enrollment_count != 1 else ''}. "
+            "Launching sets it running: enrolled contacts enter the drip "
+            "sequence and real messages start sending on the campaign "
+            "schedule (quiet hours and the daily send cap still apply). "
+            "All asset-bearing steps reference approved assets."
         ),
         affected=[f"campaign:{campaign.id} ({campaign.name})"],
         estimated_cost_usd=0.0,
@@ -1892,6 +2024,130 @@ async def _campaign_enrollments(
                 }
                 for e in rows
             ],
+        }
+    )
+
+
+async def _campaign_enroll(
+    db: Session, user: User, inp: CampaignEnrollInput
+) -> dict[str, Any]:
+    """Enroll contacts into a draft/scheduled campaign's drip sequence.
+
+    Contacts are resolved by explicit ids and/or a search query
+    (name/email/phone fragment). Already-enrolled contacts are skipped
+    (no duplicates); unsubscribed contacts are skipped (consistency with
+    the worker's bulk-enroll, which never enrolls unsubscribed contacts).
+    Enrolling into a draft is inert — nothing sends until a human approves
+    the launch. Refuses campaigns in any other status.
+    """
+    if not inp.campaign_id and not inp.campaign_name:
+        return _error("campaign_id or campaign_name is required")
+    campaign = _resolve_campaign(
+        db, user.business_id, CampaignRefInput(
+            campaign_id=inp.campaign_id, campaign_name=inp.campaign_name
+        ),
+    )
+    if campaign is None:
+        return _error("campaign not found in your business")
+    if campaign.status not in (CampaignStatus.draft, CampaignStatus.scheduled):
+        return _error(
+            f"campaign '{campaign.name}' is {campaign.status.value} — "
+            "contacts can only be enrolled into draft or scheduled campaigns"
+        )
+    if not inp.contact_ids and not (inp.contact_query or "").strip():
+        return _error(
+            "contact_ids or contact_query is required — "
+            "tell me which contacts to enroll"
+        )
+
+    # Resolve the candidate contacts (tenant-scoped, deduplicated).
+    candidates: dict[uuid.UUID, Contact] = {}
+    for raw in inp.contact_ids or []:
+        try:
+            cid = uuid.UUID(str(raw))
+        except ValueError:
+            return _error(f"invalid contact id: {raw}")
+        contact = (
+            db.query(Contact)
+            .filter(Contact.business_id == user.business_id, Contact.id == cid)
+            .first()
+        )
+        if contact is None:
+            return _error(f"contact not found in your business: {raw}")
+        candidates[contact.id] = contact
+    q = (inp.contact_query or "").strip()
+    if q:
+        like = f"%{q}%"
+        for contact in (
+            db.query(Contact)
+            .filter(
+                Contact.business_id == user.business_id,
+                or_(
+                    Contact.first_name.ilike(like),
+                    Contact.last_name.ilike(like),
+                    Contact.email.ilike(like),
+                    Contact.phone.ilike(like),
+                ),
+            )
+            .limit(200)
+            .all()
+        ):
+            candidates[contact.id] = contact
+    if not candidates:
+        return _error("no contacts matched — nothing to enroll")
+
+    already = {
+        row[0]
+        for row in db.query(CampaignEnrollment.contact_id)
+        .filter(CampaignEnrollment.campaign_id == campaign.id)
+        .all()
+    }
+    enrolled: list[dict[str, str | None]] = []
+    skipped_duplicate = 0
+    skipped_unsubscribed = 0
+    for contact in candidates.values():
+        if contact.id in already:
+            skipped_duplicate += 1
+            continue
+        if contact.unsubscribed:
+            skipped_unsubscribed += 1
+            continue
+        db.add(
+            CampaignEnrollment(
+                campaign_id=campaign.id,
+                contact_id=contact.id,
+                current_step=0,
+                status=EnrollmentStatus.active,
+                next_run_at=campaign.starts_at,
+            )
+        )
+        enrolled.append(
+            {
+                "contact_id": str(contact.id),
+                "email": contact.email,
+                "name": " ".join(
+                    p for p in [contact.first_name, contact.last_name] if p
+                ) or None,
+            }
+        )
+    db.commit()
+    return _ok(
+        {
+            "campaign_id": str(campaign.id),
+            "campaign_name": campaign.name,
+            "campaign_status": campaign.status.value,
+            "enrolled": len(enrolled),
+            "skipped_already_enrolled": skipped_duplicate,
+            "skipped_unsubscribed": skipped_unsubscribed,
+            "contacts": enrolled,
+            "note": (
+                "enrolled into the drip sequence at step 0. "
+                + (
+                    "The campaign is a draft — nothing will send until a human approves the launch."
+                    if campaign.status == CampaignStatus.draft
+                    else "The campaign is scheduled — the worker will advance these enrollments on the campaign schedule."
+                )
+            ),
         }
     )
 
@@ -2646,9 +2902,11 @@ _register(
 _register(
     ToolDef(
         id="draven.campaign_create",
-        description="Create a campaign as draft (add steps, then launch when ready).",
+        description="MEDIUM RISK — create a campaign as DRAFT with an optional drip sequence "
+        "(ordered steps: channel, delay_hours, template/asset by id or name). "
+        "Never auto-launches; launch requires separate human approval.",
         input_model=CampaignCreateInput,
-        risk="low",
+        risk="medium",
         execute=_campaign_create,
     )
 )
@@ -2664,9 +2922,10 @@ _register(
 _register(
     ToolDef(
         id="draven.campaign_steps_add",
-        description="Append steps to a campaign (template/asset refs validated as owned).",
+        description="MEDIUM RISK — append drip steps to a DRAFT campaign only "
+        "(refuses non-draft). Template/asset refs by id or name, validated as owned.",
         input_model=CampaignStepsAddInput,
-        risk="low",
+        risk="medium",
         execute=_campaign_steps_add,
     )
 )
@@ -2695,6 +2954,18 @@ _register(
         input_model=CampaignEnrollmentsInput,
         risk="low",
         execute=_campaign_enrollments,
+    )
+)
+_register(
+    ToolDef(
+        id="draven.campaign_enroll",
+        description="HIGH RISK — enroll contacts into a draft/scheduled campaign's drip "
+        "sequence (by contact ids and/or a name/email/phone search query). "
+        "Skips already-enrolled and unsubscribed contacts; refuses other statuses. "
+        "Enrolling into a draft sends nothing until launch is human-approved.",
+        input_model=CampaignEnrollInput,
+        risk="high",
+        execute=_campaign_enroll,
     )
 )
 _register(

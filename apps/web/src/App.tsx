@@ -11,8 +11,10 @@ import CalendarPage from "./pages/Calendar";
 import ApprovalsPage from "./pages/Approvals";
 import AssetsPage from "./pages/Assets";
 import AnalyticsPage from "./pages/Analytics";
+import AutopilotPage from "./pages/Autopilot";
 import OutboxPage from "./pages/Outbox";
 import OpsPage from "./pages/Ops";
+import InterviewPage from "./pages/Interview";
 
 export default function App() {
   return (
@@ -32,12 +34,14 @@ export default function App() {
             <Route path="/onboarding" element={<OnboardingPage />} />
             <Route path="/campaigns" element={<CampaignsPage />} />
             <Route path="/campaigns/:id" element={<CampaignDetailPage />} />
+            <Route path="/autopilot" element={<AutopilotPage />} />
             <Route path="/calendar" element={<CalendarPage />} />
             <Route path="/approvals" element={<ApprovalsPage />} />
             <Route path="/assets" element={<AssetsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/outbox" element={<OutboxPage />} />
             <Route path="/ops" element={<OpsPage />} />
+            <Route path="/interview" element={<InterviewPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

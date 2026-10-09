@@ -27,6 +27,12 @@ import PipelinePage from "./pages/Pipeline";
 import MeetingsPage from "./pages/Meetings";
 import KnowledgePage from "./pages/Knowledge";
 import IntegrationsPage from "./pages/Integrations";
+import {
+  TravelCustomersPage,
+  TravelDashboardPage,
+  TravelLeadsPage,
+  TravelTripRequestsPage,
+} from "./pages/Travel";
 
 export default function App() {
   return (
@@ -63,6 +69,13 @@ export default function App() {
             <Route path="/market-intel/:id" element={<MarketIntelPage />} />
             <Route path="/alpha" element={<AlphaPage />} />
             <Route path="/pipeline" element={<PipelinePage />} />
+            <Route path="/travel" element={<TravelDashboardPage />} />
+            <Route path="/travel/leads" element={<TravelLeadsPage />} />
+            <Route path="/travel/customers" element={<TravelCustomersPage />} />
+            <Route
+              path="/travel/trip-requests"
+              element={<TravelTripRequestsPage />}
+            />
             <Route path="/meetings" element={<MeetingsPage />} />
             <Route path="/knowledge" element={<KnowledgePage />} />
             <Route path="/integrations" element={<IntegrationsPage />} />

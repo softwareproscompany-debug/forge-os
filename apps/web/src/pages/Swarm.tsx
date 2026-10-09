@@ -158,7 +158,7 @@ export default function Swarm() {
     try {
       const r = await apiFetch<{ run_id: string; status: string }>("/draven/swarm/run", {
         method: "POST",
-        body: JSON.stringify(demo ? { goal: "demo", demo: true } : { goal }),
+        body: demo ? { goal: "demo", demo: true } : { goal },
       });
       setRunStatus(r.status);
       if (pollRef.current) clearInterval(pollRef.current);

@@ -6,8 +6,13 @@ the ``worker`` package is importable). The dotted path is overridable via
 
 * ``redis_settings`` — built from ``REDIS_URL`` (``redis://localhost:6379/0``
   fallback for local dev).
-* ``functions`` — the four jobs in :mod:`worker.jobs`.
-* ``cron_jobs`` — :func:`campaign_tick` every 60 seconds.
+* ``functions`` — the six jobs in :mod:`worker.jobs`.
+* ``cron_jobs`` — :func:`campaign_tick` every 60 seconds, plus
+  :func:`autopilot_plan` hourly on the hour. The autopilot cron is hourly
+  (not daily) on purpose: each business has its own timezone, and the job
+  drafts the week's plan at the business's *local* Monday 06:00, so it must
+  wake every hour to catch every timezone's 06:00. The job itself is a
+  no-op outside that window.
 * ``queue_name`` — ``forge`` per CONTRACTS.md (overridable via
   ``ARQ_QUEUE_NAME``).
 """
@@ -22,7 +27,14 @@ from arq.connections import RedisSettings
 from sqlalchemy import text
 
 from forge_db.session import SessionLocal
-from worker.jobs import campaign_tick, generate_asset, handle_event, send_message
+from worker.jobs import (
+    autopilot_plan,
+    campaign_tick,
+    generate_asset,
+    handle_event,
+    send_message,
+    weekly_summary,
+)
 
 log = logging.getLogger("forgeos.worker")
 
@@ -71,8 +83,28 @@ async def on_shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """arq settings. Import path: ``worker.settings.WorkerSettings``."""
 
-    functions = [generate_asset, send_message, campaign_tick, handle_event]
-    cron_jobs = [cron(campaign_tick, minute={*range(60)})]  # every 60s, at :00
+    functions = [
+        generate_asset,
+        send_message,
+        campaign_tick,
+        handle_event,
+        autopilot_plan,
+        weekly_summary,
+    ]
+    # campaign_tick: every 60s at :00. autopilot_plan: every hour at :00 — it
+    # drafts each business's weekly plan only at that business's local
+    # Monday 06:00 (the job itself is a no-op outside that window), so an
+    # hourly wake is the cheapest way to cover every timezone.
+    # weekly_summary: every hour at :00 — it cuts each business's weekly
+    # evidence summary only at that business's local Sunday 23:00. A single
+    # daily cron cannot honor per-business timezones, hence the hourly wake
+    # with the gating inside the job. NOTE: minute={0} is load-bearing —
+    # arq treats an omitted minute as a wildcard (every minute).
+    cron_jobs = [
+        cron(campaign_tick, minute={*range(60)}),
+        cron(autopilot_plan, hour={*range(24)}, minute={0}),
+        cron(weekly_summary, hour={*range(24)}, minute={0}),
+    ]
     redis_settings = _redis_settings()
     queue_name = os.environ.get("ARQ_QUEUE_NAME", "forge")
     on_startup = on_startup

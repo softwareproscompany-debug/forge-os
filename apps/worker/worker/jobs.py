@@ -1,6 +1,6 @@
 """ForgeOS worker jobs (arq).
 
-Four jobs, per CONTRACTS.md:
+Six jobs, per CONTRACTS.md:
 
 * :func:`generate_asset` — render a prompt from the asset kind + brand kit,
   call ``forge_llm.get_provider().generate()``, run guardrails, save the
@@ -14,6 +14,10 @@ Four jobs, per CONTRACTS.md:
   quiet hours and the per-business daily send cap.
 * :func:`handle_event` — ``contact_added`` enrollment plus
   opened/clicked/converted stamping via ``provider_message_id``.
+* :func:`autopilot_plan` — hourly cron: at each business's local Monday
+  06:00, draft the week's content plan (``content_plans``) from the latest
+  brand kit + latest weekly evidence summary + latest approved assets.
+  Human approval happens in the API/UI; this job only ever writes drafts.
 
 Conventions:
 
@@ -31,14 +35,16 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import os
 import uuid
 from collections import deque
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 import jinja2
@@ -67,13 +73,16 @@ from forge_db.models import (
     CampaignStatus,
     Channel,
     Contact,
+    ContentPlan,
     EnrollmentStatus,
     Event,
     EventKind,
     GenerationLog,
+    PlanStatus,
     Send,
     SendStatus,
     Template,
+    WeeklySummary,
     assert_asset_transition,
 )
 from forge_db.session import SessionLocal
@@ -101,6 +110,8 @@ __all__ = [
     "send_message",
     "campaign_tick",
     "handle_event",
+    "autopilot_plan",
+    "weekly_summary",
 ]
 
 log = logging.getLogger("forgeos.worker")
@@ -314,6 +325,7 @@ async def generate_asset(ctx: dict, asset_id: str) -> dict[str, Any]:
         extra_direction = (asset.variables or {}).get("prompt")
         if extra_direction:
             prompt_text += f"\n\nAdditional direction from the requester:\n{extra_direction}"
+        prompt_text = _with_weekly_evidence(prompt_text, db, asset.business_id)
 
         system_prompt = build_brand_system_prompt(brand)
         provider = get_provider()
@@ -986,3 +998,802 @@ async def handle_event(ctx: dict, event_id: str) -> dict[str, Any]:
             return _handle_engagement(db, event)
         log.info("handle_event: unknown event kind %r; logged and ignored", kind)
         return {"ok": True, "ignored": True, "kind": kind}
+
+# ---------------------------------------------------------------------------
+# autopilot_plan
+# ---------------------------------------------------------------------------
+
+
+#: Local weekday (Monday) and hour at which a business's weekly content plan
+#: is drafted.
+_PLAN_WEEKDAY = 0  # Monday
+_PLAN_HOUR = 6
+
+#: How many of the latest approved assets the planner may look at.
+_PLAN_ASSET_LOOKBACK = 10
+
+#: Allowed (kind, channel) pairs for plan items. Kept in sync with the
+#: ``items`` contract in CONTRACTS.md.
+_PLAN_KINDS = ("email_copy", "social_post", "sms")
+_PLAN_CHANNELS = ("email", "sms", "social")
+
+
+def _business_tz(tz_name: str | None) -> ZoneInfo:
+    """stdlib zoneinfo for a business timezone; UTC on unknown/missing names."""
+    try:
+        return ZoneInfo(tz_name or "UTC")
+    except ZoneInfoNotFoundError:
+        log.warning("autopilot_plan: unknown timezone %r; falling back to UTC", tz_name)
+        return ZoneInfo("UTC")
+
+
+def _is_plan_moment(local_now: datetime) -> bool:
+    """True only during local Monday 06:xx — the weekly draft window.
+
+    The job is an hourly cron (see :mod:`worker.settings`): each business
+    lives in its own timezone, so the job must wake every hour to ask
+    "is it 06:00 on Monday for *this* business yet?". A single daily cron
+    at a fixed UTC hour would miss businesses whose Monday 06:00 falls in
+    other UTC hours.
+    """
+    return local_now.weekday() == _PLAN_WEEKDAY and local_now.hour == _PLAN_HOUR
+
+
+def _latest_brand_kit(db: Session, business_id: uuid.UUID) -> BrandKit | None:
+    return (
+        db.query(BrandKit)
+        .filter(BrandKit.business_id == business_id)
+        .order_by(BrandKit.version.desc(), BrandKit.created_at.desc())
+        .first()
+    )
+
+
+def _latest_summary(db: Session, business_id: uuid.UUID) -> WeeklySummary | None:
+    return (
+        db.query(WeeklySummary)
+        .filter(WeeklySummary.business_id == business_id)
+        .order_by(WeeklySummary.week_start.desc(), WeeklySummary.created_at.desc())
+        .first()
+    )
+
+
+def _latest_approved_assets(db: Session, business_id: uuid.UUID) -> list[Asset]:
+    return (
+        db.query(Asset)
+        .filter(
+            Asset.business_id == business_id,
+            Asset.status == AssetStatus.approved,
+        )
+        .order_by(Asset.created_at.desc(), Asset.id.desc())
+        .limit(_PLAN_ASSET_LOOKBACK)
+        .all()
+    )
+
+
+def _resolve_approved_asset(
+    db: Session, business_id: uuid.UUID, raw: Any
+) -> Asset | None:
+    """Return the asset for ``raw`` (a UUID string from JSON) iff it exists,
+    belongs to the business, and is approved — else ``None``."""
+    if raw is None:
+        return None
+    try:
+        aid = uuid.UUID(str(raw))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    asset = (
+        db.query(Asset)
+        .filter(Asset.business_id == business_id, Asset.id == aid)
+        .first()
+    )
+    if asset is None or asset.status != AssetStatus.approved:
+        return None
+    return asset
+
+
+def _pick_email_asset(
+    db: Session,
+    business_id: uuid.UUID,
+    summary: WeeklySummary | None,
+    approved_assets: list[Asset],
+) -> Asset | None:
+    """Which approved email asset the plan's email item should reuse.
+
+    1. The weekly summary's top asset, if its kind is ``email_copy`` (and it
+       still exists / is approved / is owned by this business).
+    2. Otherwise the newest approved ``email_copy`` asset.
+    3. Otherwise ``None`` (the item carries no ``asset_id``).
+    """
+    if summary is not None and summary.top_assets:
+        top = summary.top_assets[0] or {}
+        if top.get("kind") == AssetKind.email_copy.value:
+            asset = _resolve_approved_asset(db, business_id, top.get("asset_id"))
+            if asset is not None:
+                return asset
+    for asset in approved_assets:
+        if asset.kind == AssetKind.email_copy:
+            return asset
+    return None
+
+
+def _stub_plan_items(
+    week_start: Any,
+    brand_kit: BrandKit | None,
+    summary: WeeklySummary | None,
+    email_asset: Asset | None,
+) -> list[dict[str, Any]]:
+    """Deterministic draft items: Tue email, Thu social, Sat SMS.
+
+    Used always on the stub provider and as the fallback whenever the live
+    LLM planning call fails or returns unusable JSON — the planner never
+    blocks on the LLM.
+    """
+    week = week_start.isoformat()
+    voice = ""
+    if brand_kit is not None and (brand_kit.voice_description or "").strip():
+        voice = brand_kit.voice_description.strip()
+    voice_part = f" written in {voice}" if voice else ""
+
+    rec = ""
+    if summary is not None and (summary.recommendation or "").strip():
+        rec = summary.recommendation.strip()[:200]
+
+    social_brief = (
+        f"Thursday social post for the week of {week}{voice_part}. "
+        + (
+            f"Angle comes from last week's evidence: {rec}"
+            if rec
+            else "Angle: reuse this week's email hook in a shorter, punchier form."
+        )
+    )
+    items: list[dict[str, Any]] = [
+        {
+            "kind": "email_copy",
+            "channel": "email",
+            "day": 1,
+            "title": f"Autopilot: weekly email — {week}",
+            "brief": (
+                f"Tuesday newsletter for the week of {week}{voice_part}. "
+                "Lead with the offer from the current calendar; keep it under 300 words."
+            ),
+        },
+        {
+            "kind": "social_post",
+            "channel": "social",
+            "day": 3,
+            "title": f"Autopilot: weekly social — {week}",
+            "brief": social_brief,
+        },
+        {
+            "kind": "sms",
+            "channel": "sms",
+            "day": 5,
+            "title": f"Autopilot: weekly SMS — {week}",
+            "brief": (
+                f"Saturday SMS for the week of {week}: one short reminder tied to "
+                "the week's offer, under 160 characters."
+            ),
+        },
+    ]
+    if email_asset is not None:
+        items[0]["asset_id"] = str(email_asset.id)
+    return items
+
+
+async def _llm_plan_items(
+    week_start: Any,
+    brand_kit: BrandKit | None,
+    summary: WeeklySummary | None,
+    approved_assets: list[Asset],
+) -> list[dict[str, Any]] | None:
+    """Ask the live LLM provider for the week's items JSON.
+
+    Returns ``None`` whenever there is no live provider (the stub is active)
+    or anything goes wrong — callers always fall back to
+    :func:`_stub_plan_items`. The LLM output is strictly validated before
+    use: only the three known kinds, known channels, day 0-6, non-empty
+    title/brief, and asset_ids that reference approved assets of the
+    matching kind.
+    """
+    provider = get_provider()
+    if getattr(provider, "name", "stub") == "stub":
+        return None
+
+    brand_name = ""
+    voice = ""
+    if brand_kit is not None:
+        brand_name = brand_kit.name or ""
+        voice = (brand_kit.voice_description or "").strip()
+    rec = (summary.recommendation or "").strip()[:500] if summary else ""
+    asset_lines = "\n".join(
+        f"- {a.id} | {a.kind.value} | {a.title}"
+        for a in approved_assets[:_PLAN_ASSET_LOOKBACK]
+    ) or "(none)"
+
+    prompt = (
+        "You are a weekly marketing planner. Draft this week's content plan as "
+        "a JSON array of exactly 3 objects. Each object has keys: kind "
+        '("email_copy" | "social_post" | "sms"), channel ("email" | "sms" | '
+        '"social" matching the kind), day (integer 0=Monday..6=Sunday), title '
+        "(string), brief (string, what the copywriter should write), "
+        'asset_id (string UUID of a reusable approved asset from the list '
+        'below, or null). One item per kind: email on day 1, social on day 3, '
+        "sms on day 5. Respond with ONLY the JSON array, no prose.\n\n"
+        f"Business: {brand_name}\n"
+        f"Voice: {voice or '(not set)'}\n"
+        f"Week starting Monday: {week_start.isoformat()}\n"
+        f"Last week's evidence: {rec or '(no summary yet)'}\n"
+        f"Approved assets available for reuse:\n{asset_lines}"
+    )
+    try:
+        result = await provider.generate(
+            GenerationRequest(
+                prompt=prompt,
+                system_prompt="You output only valid JSON arrays.",
+                max_tokens=1200,
+                temperature=0.5,
+            )
+        )
+    except Exception:
+        log.exception("autopilot_plan: live LLM planning call failed; using stub items")
+        return None
+
+    try:
+        text = result.text.strip()
+        if "[" in text and "]" in text:
+            text = text[text.index("[") : text.rindex("]") + 1]
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        log.warning("autopilot_plan: LLM returned non-JSON; using stub items")
+        return None
+
+    if not isinstance(payload, list) or not (1 <= len(payload) <= 5):
+        return None
+    approved_ids = {a.id for a in approved_assets}
+    items: list[dict[str, Any]] = []
+    for raw in payload:
+        if not isinstance(raw, dict):
+            return None
+        kind = str(raw.get("kind", ""))
+        channel = str(raw.get("channel", ""))
+        try:
+            day = int(raw.get("day", -1))
+        except (TypeError, ValueError):
+            return None
+        title = str(raw.get("title", "")).strip()
+        brief = str(raw.get("brief", "")).strip()
+        if (
+            kind not in _PLAN_KINDS
+            or channel not in _PLAN_CHANNELS
+            or not (0 <= day <= 6)
+            or not title
+            or not brief
+        ):
+            return None
+        item: dict[str, Any] = {
+            "kind": kind,
+            "channel": channel,
+            "day": day,
+            "title": title,
+            "brief": brief,
+        }
+        if raw.get("asset_id") is not None:
+            try:
+                aid = uuid.UUID(str(raw["asset_id"]))
+            except (ValueError, AttributeError, TypeError):
+                return None
+            if aid not in approved_ids:
+                return None
+            item["asset_id"] = str(aid)
+        items.append(item)
+    return items
+
+
+async def autopilot_plan(ctx: dict) -> dict[str, Any]:
+    """Hourly cron: draft each business's weekly content plan at its local
+    Monday 06:00.
+
+    For every business: convert ``now`` to the business timezone (stdlib
+    ``zoneinfo``, UTC fallback); skip unless it is Monday 06:xx local;
+    skip when a ``draft`` or ``approved`` plan already exists for that
+    (business, week_start); otherwise gather the latest brand kit, latest
+    weekly summary, and latest approved assets, build the 3-item draft
+    (Tue email / Thu social / Sat SMS), and store it as ``status=draft``.
+    Commits per business so one bad row cannot poison the whole run.
+    """
+    now = utcnow()
+    summary: dict[str, int] = {
+        "businesses": 0,
+        "drafted": 0,
+        "skipped_not_monday": 0,
+        "skipped_exists": 0,
+        "errors": 0,
+    }
+    try:
+        db = _new_session()
+    except Exception:
+        log.error("autopilot_plan: database unavailable; run aborted (no silent pass)")
+        return {"ok": False, "error": "database unavailable", **summary}
+
+    try:
+        businesses = db.query(Business).all()
+        for business in businesses:
+            summary["businesses"] += 1
+            local_now = now.astimezone(_business_tz(business.timezone))
+            if not _is_plan_moment(local_now):
+                summary["skipped_not_monday"] += 1
+                continue
+            week_start = local_now.date()
+            exists = (
+                db.query(ContentPlan.id)
+                .filter(
+                    ContentPlan.business_id == business.id,
+                    ContentPlan.week_start == week_start,
+                    ContentPlan.status.in_([PlanStatus.draft, PlanStatus.approved]),
+                )
+                .first()
+            )
+            if exists is not None:
+                summary["skipped_exists"] += 1
+                continue
+            try:
+                brand_kit = _latest_brand_kit(db, business.id)
+                weekly_summary = _latest_summary(db, business.id)
+                approved_assets = _latest_approved_assets(db, business.id)
+                email_asset = _pick_email_asset(
+                    db, business.id, weekly_summary, approved_assets
+                )
+                items = await _llm_plan_items(
+                    week_start, brand_kit, weekly_summary, approved_assets
+                )
+                if items is None:
+                    items = _stub_plan_items(
+                        week_start, brand_kit, weekly_summary, email_asset
+                    )
+                db.add(
+                    ContentPlan(
+                        business_id=business.id,
+                        week_start=week_start,
+                        status=PlanStatus.draft,
+                        items=items,
+                    )
+                )
+                db.commit()
+                summary["drafted"] += 1
+                log.info(
+                    "autopilot_plan: drafted plan for business %s week %s (%d items)",
+                    business.id,
+                    week_start,
+                    len(items),
+                )
+            except Exception:
+                db.rollback()
+                summary["errors"] += 1
+                log.exception(
+                    "autopilot_plan: failed to draft plan for business %s "
+                    "(other businesses unaffected)",
+                    business.id,
+                )
+        log.info("autopilot_plan done: %s", summary)
+        return {"ok": True, **summary}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# weekly_summary
+# ---------------------------------------------------------------------------
+
+
+#: Local weekday/hour at which a business's weekly evidence summary is cut:
+#: Sunday 23:xx, after the week's last sends have landed.
+_SUMMARY_WEEKDAY = 6  # Sunday
+_SUMMARY_HOUR = 23
+
+#: Summary window: the 7 days ending when the job runs, ``[now-7d, now)``.
+_SUMMARY_WINDOW = timedelta(days=7)
+
+#: How many assets appear in each of the top/bottom lists.
+_SUMMARY_LIST_SIZE = 3
+
+#: Segment label for contacts with no tags.
+_UNTAGGED = "untagged"
+
+
+def _is_summary_moment(local_now: datetime) -> bool:
+    """True only during local Sunday 23:xx — the weekly summary window.
+
+    The job is an hourly cron (see :mod:`worker.settings`): each business
+    lives in its own timezone, so the job must wake every hour to ask
+    "is it 23:00 on Sunday for *this* business yet?". A single daily cron
+    at a fixed UTC hour would miss businesses whose Sunday 23:00 falls in
+    other UTC hours.
+    """
+    return local_now.weekday() == _SUMMARY_WEEKDAY and local_now.hour == _SUMMARY_HOUR
+
+
+def _summary_week_start(local_now: datetime) -> date:
+    """Monday (date) of the week that just ended, given a Sunday local time."""
+    return local_now.date() - timedelta(days=6)
+
+
+def _entry_sort_key(entry: dict[str, Any], ascending: bool) -> tuple:
+    """Deterministic ordering: rate, then asset id.
+
+    ``ascending=False`` -> top list (rate desc); ``True`` -> bottom list
+    (rate asc). Asset id breaks ties so the output is stable run to run.
+    """
+    rate = entry["conversion_rate"]
+    return (rate, entry["asset_id"]) if ascending else (-rate, entry["asset_id"])
+
+
+def _weekly_asset_entries(
+    db: Session, business_id: uuid.UUID, since: datetime, until: datetime
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Top/bottom assets by conversion rate over sends created in the window.
+
+    ``delivered`` = sends with status ``delivered``; ``converted`` = sends
+    with ``converted_at`` set; ``rate = converted / delivered`` (0 when
+    nothing delivered). Only assets with ``delivered >= 1`` rank. Returns
+    ``(top, bottom)`` lists of
+    ``{asset_id, title, kind, delivered, converted, conversion_rate}``.
+    """
+    rows = (
+        db.query(
+            Asset.id,
+            Asset.title,
+            Asset.kind,
+            func.count().filter(Send.status == SendStatus.delivered).label("delivered"),
+            func.count().filter(Send.converted_at.is_not(None)).label("converted"),
+        )
+        .join(Send, Send.asset_id == Asset.id)
+        .filter(
+            Send.business_id == business_id,
+            Send.created_at >= as_naive_utc(since),
+            Send.created_at < as_naive_utc(until),
+        )
+        .group_by(Asset.id, Asset.title, Asset.kind)
+        .all()
+    )
+    entries: list[dict[str, Any]] = []
+    for asset_id, title, kind, delivered, converted in rows:
+        if delivered < 1:
+            continue
+        rate = converted / delivered
+        entries.append(
+            {
+                "asset_id": str(asset_id),
+                "title": title,
+                "kind": kind.value if isinstance(kind, AssetKind) else str(kind),
+                "delivered": delivered,
+                "converted": converted,
+                "conversion_rate": round(rate, 4),
+            }
+        )
+    top = sorted(entries, key=lambda e: _entry_sort_key(e, False))[:_SUMMARY_LIST_SIZE]
+    bottom = sorted(entries, key=lambda e: _entry_sort_key(e, True))[:_SUMMARY_LIST_SIZE]
+    return top, bottom
+
+
+def _weekly_segment_best(
+    db: Session, business_id: uuid.UUID, since: datetime, until: datetime
+) -> dict[str, dict[str, Any]]:
+    """Best channel per contact-tag segment over sends created in the window.
+
+    A contact contributes to every tag it carries; contacts with no tags
+    land in ``"untagged"``. Per (segment, channel): ``rate =
+    converted/delivered``; the best channel wins on max rate, tiebroken by
+    delivered desc then channel name. Segments with no delivered sends are
+    omitted. Returns ``{segment: {channel, conversion_rate, delivered}}``.
+    """
+    contacts = (
+        db.query(Contact.id, Contact.tags)
+        .filter(Contact.business_id == business_id)
+        .all()
+    )
+    segments_of: dict[uuid.UUID, list[str]] = {}
+    for contact_id, tags in contacts:
+        segments_of[contact_id] = list(tags) if tags else [_UNTAGGED]
+
+    sends = (
+        db.query(Send.contact_id, Send.channel, Send.status, Send.converted_at)
+        .filter(
+            Send.business_id == business_id,
+            Send.created_at >= as_naive_utc(since),
+            Send.created_at < as_naive_utc(until),
+        )
+        .all()
+    )
+    agg: dict[tuple[str, str], list[int]] = {}  # (segment, channel) -> [delivered, converted]
+    for contact_id, channel, status, converted_at in sends:
+        channel_name = channel.value if isinstance(channel, Channel) else str(channel)
+        delivered = 1 if status == SendStatus.delivered else 0
+        converted = 1 if converted_at is not None else 0
+        for segment in segments_of.get(contact_id, [_UNTAGGED]):
+            slot = agg.setdefault((segment, channel_name), [0, 0])
+            slot[0] += delivered
+            slot[1] += converted
+
+    ranked: dict[str, tuple] = {}  # segment -> (sort key, rate, delivered, channel)
+    for (segment, channel_name), (delivered, converted) in agg.items():
+        if delivered < 1:
+            continue
+        rate = converted / delivered
+        key = (-rate, -delivered, channel_name)
+        if segment not in ranked or key < ranked[segment][0]:
+            ranked[segment] = (key, rate, delivered, channel_name)
+
+    return {
+        segment: {
+            "channel": channel_name,
+            "conversion_rate": round(rate, 4),
+            "delivered": delivered,
+        }
+        for segment, (_, rate, delivered, channel_name) in sorted(ranked.items())
+    }
+
+
+def _weekly_channel_totals(
+    db: Session, business_id: uuid.UUID, since: datetime, until: datetime
+) -> dict[str, tuple[int, int]]:
+    """(delivered, converted) per channel over sends created in the window."""
+    sends = (
+        db.query(Send.channel, Send.status, Send.converted_at)
+        .filter(
+            Send.business_id == business_id,
+            Send.created_at >= as_naive_utc(since),
+            Send.created_at < as_naive_utc(until),
+        )
+        .all()
+    )
+    totals: dict[str, list[int]] = {}
+    for channel, status, converted_at in sends:
+        channel_name = channel.value if isinstance(channel, Channel) else str(channel)
+        slot = totals.setdefault(channel_name, [0, 0])
+        if status == SendStatus.delivered:
+            slot[0] += 1
+        if converted_at is not None:
+            slot[1] += 1
+    return {ch: (d, c) for ch, (d, c) in totals.items()}
+
+
+def _best_overall_channel(channel_totals: dict[str, tuple[int, int]]) -> str:
+    """Channel with the best conversion rate overall (delivered>=1).
+
+    Tiebreak: delivered desc, then channel name — same rule as segments.
+    """
+    best_key: tuple | None = None
+    best_channel = "—"
+    for channel_name, (delivered, converted) in channel_totals.items():
+        if delivered < 1:
+            continue
+        key = (-(converted / delivered), -delivered, channel_name)
+        if best_key is None or key < best_key:
+            best_key = key
+            best_channel = channel_name
+    return best_channel
+
+
+def _pct(rate: float) -> str:
+    return f"{rate * 100:.1f}%"
+
+
+def _stub_recommendation(
+    top: list[dict[str, Any]],
+    bottom: list[dict[str, Any]],
+    segments: dict[str, dict[str, Any]],
+    channel_totals: dict[str, tuple[int, int]],
+) -> str:
+    """Deterministic recommendation paragraph (stub provider path)."""
+    if not top:
+        return (
+            "No delivered sends in the last 7 days, so there is no engagement "
+            "evidence to summarize. Generate and send content this week to feed "
+            "next week's summary."
+        )
+    best = top[0]
+    worst = bottom[0] if bottom else best
+    if segments:
+        seg_name = min(segments, key=lambda s: (-segments[s]["delivered"], s))
+        seg_line = f"Best channel for '{seg_name}' is {segments[seg_name]['channel']}."
+    else:
+        seg_line = "No segment had delivered sends this week."
+    top_kinds = ", ".join(dict.fromkeys(e["kind"] for e in top))
+    return (
+        f"Top performer: '{best['title']}' ({best['kind']}) converted at "
+        f"{_pct(best['conversion_rate'])} of delivered sends. "
+        f"Weakest: '{worst['title']}' at {_pct(worst['conversion_rate'])}. "
+        f"{seg_line} "
+        f"Do more of this: {top_kinds} via {_best_overall_channel(channel_totals)}."
+    )
+
+
+async def _recommendation_text(
+    top: list[dict[str, Any]],
+    bottom: list[dict[str, Any]],
+    segments: dict[str, dict[str, Any]],
+    channel_totals: dict[str, tuple[int, int]],
+) -> str:
+    """Build the 'do more of this' paragraph.
+
+    Stub provider -> deterministic template. Live provider -> one LLM call
+    over the stats JSON, with a try/except that falls back to the stub
+    template so a provider outage never blocks the weekly summary.
+    """
+    provider = get_provider()
+    if provider.name != "stub":
+        stats = {
+            "top_assets": top,
+            "bottom_assets": bottom,
+            "best_channel_per_segment": segments,
+        }
+        try:
+            result = await provider.generate(
+                GenerationRequest(
+                    prompt=(
+                        "You are a marketing analyst. Write ONE paragraph of "
+                        "concrete 'do more of this' advice for next week's "
+                        "marketing, grounded in last week's engagement stats "
+                        "below. Name the top-performing asset, the weakest "
+                        "asset, and the best channel per audience segment. "
+                        "Keep it under 120 words.\n\n"
+                        f"stats: {json.dumps(stats, default=str)}"
+                    ),
+                    system_prompt="You are a terse, practical marketing analyst.",
+                    max_tokens=300,
+                    temperature=0.5,
+                )
+            )
+            text = (result.text or "").strip()
+            if text:
+                return text
+            log.warning("weekly_summary: LLM returned empty text; using stub template")
+        except Exception:
+            log.warning(
+                "weekly_summary: LLM recommendation failed; using stub template",
+                exc_info=True,
+            )
+    return _stub_recommendation(top, bottom, segments, channel_totals)
+
+
+def _latest_summary_text(db: Session, business_id: uuid.UUID) -> str | None:
+    """Latest weekly-summary recommendation paragraph, or None.
+
+    Pure-ish (one read query, no writes) so tests can exercise it directly.
+    Card 5's Origination wiring: :func:`generate_asset` appends this to the
+    generation prompt so next week's drafts are shaped by last week's
+    evidence.
+    """
+    summary = _latest_summary(db, business_id)
+    if summary is None:
+        return None
+    text = (summary.recommendation or "").strip()
+    return text or None
+
+
+def _with_weekly_evidence(
+    prompt_text: str, db: Session, business_id: uuid.UUID
+) -> str:
+    """Append last week's evidence paragraph to a generation prompt.
+
+    Kept small and clearly delimited so the augmented prompt stays auditable.
+    """
+    evidence = _latest_summary_text(db, business_id)
+    if not evidence:
+        return prompt_text
+    return prompt_text + f"\n\nLast week's evidence — let it shape this draft:\n{evidence}"
+
+
+async def _summarize_business_if_due(
+    db: Session, business: Business, now: datetime
+) -> bool:
+    """Cut and store one business's weekly summary when its moment arrives.
+
+    Returns True when a new ``WeeklySummary`` row was created. Gating:
+    local Sunday 23:xx (business timezone, UTC fallback) and no existing
+    row for (business_id, week_start). Idempotent — a second call for the
+    same week is a no-op.
+    """
+    local_now = now.astimezone(_business_tz(business.timezone))
+    if not _is_summary_moment(local_now):
+        return False
+    week_start = _summary_week_start(local_now)
+    exists = (
+        db.query(WeeklySummary.id)
+        .filter(
+            WeeklySummary.business_id == business.id,
+            WeeklySummary.week_start == week_start,
+        )
+        .first()
+    )
+    if exists is not None:
+        log.info(
+            "weekly_summary: business %s already summarized for week %s; skipping",
+            business.id,
+            week_start,
+        )
+        return False
+    since = now - _SUMMARY_WINDOW
+    top, bottom = _weekly_asset_entries(db, business.id, since, now)
+    segments = _weekly_segment_best(db, business.id, since, now)
+    channel_totals = _weekly_channel_totals(db, business.id, since, now)
+    recommendation = await _recommendation_text(top, bottom, segments, channel_totals)
+    db.add(
+        WeeklySummary(
+            business_id=business.id,
+            week_start=week_start,
+            top_assets=top,
+            bottom_assets=bottom,
+            best_channel_per_segment=segments,
+            recommendation=recommendation,
+        )
+    )
+    log.info(
+        "weekly_summary: stored summary for business %s week %s "
+        "(%d top / %d bottom assets, %d segments)",
+        business.id,
+        week_start,
+        len(top),
+        len(bottom),
+        len(segments),
+    )
+    return True
+
+
+async def weekly_summary(ctx: dict) -> dict[str, Any]:
+    """Hourly cron: cut each business's weekly evidence summary at its local
+    Sunday 23:00.
+
+    Why hourly instead of one daily 23:00 run: businesses live in different
+    timezones, so there is no single UTC hour that is Sunday 23:00 for
+    everyone. The job wakes every hour (``cron(weekly_summary,
+    hour={*range(24)}, minute={0})`` in :mod:`worker.settings`) and, per
+    business, converts ``now`` to the business timezone (stdlib
+    ``zoneinfo``, UTC fallback on unknown names). Only when local time is
+    Sunday 23:xx — and no ``WeeklySummary`` exists yet for
+    ``(business_id, week_start=<the Monday just passed>)`` — does it
+    aggregate the last 7 days ``[now-7d, now)`` of sends into top/bottom
+    assets, best channel per segment, and a recommendation paragraph, then
+    store the row. Outside that window the job is a cheap no-op. Commits
+    per business so one bad row cannot poison the whole run.
+    """
+    now = utcnow()
+    businesses_processed = 0
+    summaries_created = 0
+    try:
+        db = _new_session()
+    except Exception:
+        log.error("weekly_summary: database unavailable; run aborted (no silent pass)")
+        return {
+            "ok": False,
+            "error": "database unavailable",
+            "businesses_processed": businesses_processed,
+            "summaries_created": summaries_created,
+        }
+    try:
+        businesses = db.query(Business).all()
+        for business in businesses:
+            businesses_processed += 1
+            try:
+                if await _summarize_business_if_due(db, business, now):
+                    summaries_created += 1
+                db.commit()
+            except Exception:
+                db.rollback()
+                log.exception(
+                    "weekly_summary: failed for business %s "
+                    "(other businesses unaffected)",
+                    business.id,
+                )
+        log.info(
+            "weekly_summary done: processed=%d created=%d",
+            businesses_processed,
+            summaries_created,
+        )
+        return {
+            "ok": True,
+            "businesses_processed": businesses_processed,
+            "summaries_created": summaries_created,
+        }
+    finally:
+        db.close()

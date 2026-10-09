@@ -19,10 +19,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import func
 
-from forge_db.models import Campaign, CampaignStep, GenerationLog, Send
+from forge_db.models import Campaign, CampaignStep, GenerationLog, Send, WeeklySummary
 
 from app import schemas
 from app.core.deps import CurrentUser, DbSession, get_owned_or_404, scoped
@@ -143,3 +143,30 @@ def funnel(campaign_id: uuid.UUID, user: CurrentUser, db: DbSession):
             )
         )
     return schemas.FunnelResponse(items=items)
+
+
+@router.get("/weekly-summary", response_model=schemas.WeeklySummaryOut)
+def weekly_summary(user: CurrentUser, db: DbSession):
+    """Latest Card 5 weekly evidence summary for the caller's business.
+
+    404 ``{"detail": "no weekly summary yet"}`` when the hourly worker job
+    has not cut one yet (it runs at each business's local Sunday 23:00).
+    """
+    row = (
+        db.query(WeeklySummary)
+        .filter(WeeklySummary.business_id == user.business_id)
+        .order_by(WeeklySummary.week_start.desc())
+        .first()
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="no weekly summary yet"
+        )
+    return schemas.WeeklySummaryOut(
+        week_start=row.week_start,
+        top_assets=row.top_assets or [],
+        bottom_assets=row.bottom_assets or [],
+        best_channel_per_segment=row.best_channel_per_segment or {},
+        recommendation=row.recommendation,
+        created_at=row.created_at,
+    )

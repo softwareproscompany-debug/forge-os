@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Generic, Literal, TypeVar
 
@@ -364,6 +364,39 @@ class AutopilotUpdate(BaseModel):
     quiet_hours_end: int | None = Field(default=None, ge=0, le=23)
 
 
+class PlanItem(BaseModel):
+    """One row of a content plan's ``items`` JSON (CONTRACTS.md Card 4)."""
+
+    kind: Literal["email_copy", "social_post", "sms"]
+    channel: Literal["email", "sms", "social"]
+    day: int = Field(ge=0, le=6)  # 0 = Monday
+    title: str = Field(max_length=500)
+    brief: str
+    asset_id: uuid.UUID | None = None
+
+
+class ContentPlanOut(ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    week_start: date
+    status: str
+    items: list[PlanItem]
+    created_by: uuid.UUID | None
+    approved_by: uuid.UUID | None
+    approved_at: datetime | None
+    campaign_id: uuid.UUID | None
+    created_at: datetime
+
+
+class PlanApproveIn(BaseModel):
+    plan_id: uuid.UUID
+
+
+class PlanApproveOut(BaseModel):
+    plan: ContentPlanOut
+    campaign_id: uuid.UUID
+
+
 # ---------------------------------------------------------------------------
 # Analytics
 # ---------------------------------------------------------------------------
@@ -401,6 +434,32 @@ class FunnelStep(BaseModel):
 
 class FunnelResponse(BaseModel):
     items: list[FunnelStep]
+
+
+class WeeklySummaryAsset(BaseModel):
+    asset_id: str
+    title: str
+    kind: str
+    delivered: int
+    converted: int
+    conversion_rate: float
+
+
+class WeeklySummarySegment(BaseModel):
+    channel: str
+    conversion_rate: float
+    delivered: int
+
+
+class WeeklySummaryOut(BaseModel):
+    """Latest Card 5 weekly evidence summary for the caller's business."""
+
+    week_start: date
+    top_assets: list[WeeklySummaryAsset]
+    bottom_assets: list[WeeklySummaryAsset]
+    best_channel_per_segment: dict[str, WeeklySummarySegment]
+    recommendation: str | None
+    created_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -471,3 +530,37 @@ class OpsActivityResponse(BaseModel):
     stages: dict[str, dict[str, int]]
     counters: OpsCounters
     activity: list[OpsActivityItem]
+
+
+# ---------------------------------------------------------------------------
+# Interview (Card 0 guided interview)
+# ---------------------------------------------------------------------------
+
+
+class InterviewAnswerRequest(BaseModel):
+    answer: str = Field(min_length=1, max_length=10000)
+
+
+class InterviewQuestionResponse(BaseModel):
+    """One interview turn: the next question, or done=true when finished."""
+
+    session_id: uuid.UUID
+    status: str
+    question_index: int
+    total_questions: int
+    question: str | None
+    done: bool
+
+
+class InterviewFinishResponse(BaseModel):
+    session_id: uuid.UUID
+    status: str
+    draft_brand_kit: BrandKitBase
+
+
+class InterviewConfirmRequest(BaseModel):
+    overrides: BrandKitUpdate | None = None
+
+
+class InterviewConfirmResponse(BaseModel):
+    brand_kit: BrandKitOut

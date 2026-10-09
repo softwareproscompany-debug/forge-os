@@ -66,7 +66,19 @@ def upgrade() -> None:
             server_default=sa.text("'{}'::jsonb"),
         ),
         sa.Column(
-            "status", _SWARM_STATUS, nullable=False,
+            "status",
+            # create_type=False: the type is created explicitly above (line 38).
+            # Without this, create_table re-emits CREATE TYPE and the migration
+            # fails with DuplicateObject on every Postgres database.
+            postgresql.ENUM(
+                "queued",
+                "running",
+                "completed",
+                "failed",
+                name="draven_swarm_run_status",
+                create_type=False,
+            ),
+            nullable=False,
             server_default=sa.text("'queued'"),
         ),
         sa.Column("current_phase", sa.String(128), nullable=True),

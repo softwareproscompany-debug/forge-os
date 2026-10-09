@@ -840,6 +840,61 @@ def _deterministic_reply(results: list[dict[str, Any]]) -> str:
                 f"approval. Nothing has been sent; approve it when ready."
             )
         # --- Voice parity tools ------------------------------------------------
+        elif tid == "draven.compliance_check":
+            n = len(out.get("violations", []))
+            if out.get("compliant"):
+                parts.append(
+                    "That looks compliant — no disclosure violations found. "
+                    "(Heuristic screen, not legal advice.)"
+                )
+            else:
+                fixes = "; ".join(
+                    v.get("fix", "") for v in out.get("violations", [])[:2]
+                )
+                parts.append(
+                    f"Found {n} compliance issue{'s' if n != 1 else ''}: "
+                    + "; ".join(
+                        v.get("message", "")[:120]
+                        for v in out.get("violations", [])[:2]
+                    )
+                    + (f" Fix: {fixes[:200]}" if fixes else "")
+                )
+        elif tid == "draven.compliance_rules":
+            pack = out.get("pack")
+            if pack:
+                parts.append(
+                    f"{pack.get('name')}: "
+                    + " ".join(pack.get("notes", [])[:2])
+                )
+            else:
+                names = ", ".join(p.get("name", "") for p in out.get("packs", []))
+                parts.append(f"I can check against: {names}.")
+        elif tid == "draven.web_search":
+            results = out.get("results", [])
+            if not results:
+                parts.append("No web results found for that query.")
+            else:
+                tops = "; ".join(
+                    f"{r.get('title', '')[:60]} ({r.get('url', '')[:50]})"
+                    for r in results[:3]
+                )
+                parts.append(
+                    f"Top web results: {tops}. "
+                    "These are untrusted sources — I can dig deeper with research."
+                )
+        elif tid == "draven.web_research":
+            srcs = out.get("sources", [])
+            n = out.get("sources_fetched", 0)
+            if not srcs:
+                parts.append("Web research came back empty.")
+            else:
+                titles = "; ".join(s.get("title", "")[:50] for s in srcs[:3])
+                parts.append(
+                    f"Researched {n} of {len(srcs)} sources: {titles}. "
+                    "I cross-checked them — where they agree that's the "
+                    "consensus; where they conflict, I flag it rather than "
+                    "stating it as fact."
+                )
         elif tid == "draven.brandkit_list":
             n = out.get("count", 0)
             names = ", ".join(
@@ -1030,6 +1085,38 @@ def _deterministic_reply(results: list[dict[str, Any]]) -> str:
         elif tid in ("draven.business_get", "draven.business_update"):
             parts.append(
                 f"Business: {out.get('name')} (timezone {out.get('timezone')})."
+            )
+        elif tid == "viator.product_import":
+            n = out.get("programs_new", 0)
+            found = out.get("products_found", 0)
+            items = out.get("items") or []
+            names = ", ".join(
+                i.get("program_name", "")[:40] for i in items[:3] if i.get("program_name")
+            )
+            if found == 0:
+                parts.append(
+                    "Viator search returned no products — nothing to import. "
+                    "Try a different destination or keyword."
+                )
+            else:
+                parts.append(
+                    f"Imported {n} Viator products as affiliate programs"
+                    + (f": {names}." if names else ".")
+                    + " All have trackable links. Nothing published."
+                )
+        elif tid == "viator.generate_ads":
+            n = out.get("ads_created", 0)
+            flagged = out.get("compliance_flagged", 0)
+            parts.append(
+                f"Generated {n} draft ads with FTC disclosure included"
+                + (f" ({flagged} flagged for compliance review)." if flagged else ".")
+                + " All are drafts — nothing published."
+            )
+        elif tid == "draven.campaign_create":
+            name = out.get("name") or out.get("campaign_name") or "campaign"
+            parts.append(
+                f"Campaign '{name}' created as a draft. "
+                "It needs your approval before anything sends."
             )
     if not parts:
         return (

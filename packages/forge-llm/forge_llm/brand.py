@@ -24,6 +24,20 @@ _UNSUBSCRIBE_HINTS: tuple[str, ...] = (
     "stop to end",
 )
 
+#: Phrases that count as an affiliate disclosure (case-insensitive).
+_DISCLOSURE_HINTS: tuple[str, ...] = (
+    "affiliate link",
+    "affiliate disclosure",
+    "we may earn a commission",
+    "as an amazon associate",
+)
+
+#: FTC disclosure line auto-appended to affiliate content missing one.
+AFFILIATE_DISCLOSURE = (
+    "Disclosure: this content contains affiliate links. "
+    "If you buy through them, we may earn a commission at no extra cost to you."
+)
+
 
 def build_brand_system_prompt(brand: dict) -> str:
     """Build an LLM system prompt from a brand-kit dict.
@@ -75,7 +89,8 @@ def check_guardrails(text: str, brand: dict) -> list[str]:
 
     * any ``dont_list`` phrase appearing verbatim in the text,
     * excessive capitalization (>60% of letters uppercase, min. 20 letters),
-    * a missing unsubscribe/opt-out hint when ``brand["channel"] == "email"``.
+    * a missing unsubscribe/opt-out hint when ``brand["channel"] == "email"``,
+    * a missing affiliate disclosure when ``brand["is_affiliate_content"]``.
     """
     violations: list[str] = []
     lowered = text.lower()
@@ -101,4 +116,41 @@ def check_guardrails(text: str, brand: dict) -> list[str]:
             "Missing unsubscribe hint: email copy must include an unsubscribe/opt-out line"
         )
 
+    if bool(brand.get("is_affiliate_content")) and not any(
+        hint in lowered for hint in _DISCLOSURE_HINTS
+    ):
+        violations.append(
+            "Missing affiliate disclosure: affiliate content must include an "
+            "FTC disclosure line"
+        )
+
     return violations
+
+
+def has_affiliate_disclosure(text: str) -> bool:
+    """True when ``text`` already contains an affiliate disclosure phrase."""
+    lowered = text.lower()
+    return any(hint in lowered for hint in _DISCLOSURE_HINTS)
+
+
+def looks_like_affiliate_content(text: str) -> bool:
+    """Heuristic: does ``text`` promote affiliate offers?
+
+    Matches ForgeOS short links (``/r/<slug>``) — the canonical way
+    affiliate links appear in generated copy. Program-URL detection needs
+    DB access and lives in the worker job.
+    """
+    lowered = text.lower()
+    return "/r/" in lowered
+
+
+def ensure_affiliate_disclosure(text: str) -> tuple[str, bool]:
+    """Append the FTC disclosure line when it is missing.
+
+    Returns ``(text, appended)`` — ``appended`` is True when the disclosure
+    was added. Idempotent: never appends twice.
+    """
+    if has_affiliate_disclosure(text):
+        return text, False
+    stripped = text.rstrip()
+    return f"{stripped}\n\n{AFFILIATE_DISCLOSURE}", True

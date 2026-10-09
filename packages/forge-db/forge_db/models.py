@@ -65,6 +65,8 @@ __all__ = [
     "InterviewSession",
     "WeeklySummary",
     "ContentPlan",
+    "AffiliateProgram",
+    "AffiliateLink",
 ]
 
 
@@ -196,6 +198,8 @@ class EventKind(str, enum.Enum):
     email_clicked = "email_clicked"
     sms_replied = "sms_replied"
     converted = "converted"
+    affiliate_clicked = "affiliate_clicked"
+    affiliate_converted = "affiliate_converted"
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +328,12 @@ class Asset(Base):
     tokens_out: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
     llm_provider: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     llm_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    # Affiliate marketing: marks content that promotes third-party affiliate
+    # offers. The guardrail pass auto-appends an FTC disclosure line when the
+    # body lacks one; also auto-detected from /r/ links or program URLs.
+    is_affiliate_content: Mapped[bool] = mapped_column(
+        sa.Boolean, nullable=False, default=False
+    )
     created_at: Mapped[datetime] = _created_at()
 
     parent: Mapped[Optional["Asset"]] = relationship(
@@ -599,6 +609,16 @@ class WeeklySummary(Base):
         JSONB, nullable=False, default=dict
     )
     recommendation: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    # Affiliate marketing (weekly evidence loop): top links by conversion
+    # rate (min 5 clicks) as [{link_id, label, program_name, clicks,
+    # conversions, conversion_rate, earnings_usd}], and total earnings_usd
+    # for the week. Populated by the weekly_summary worker job.
+    affiliate_top_links: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list
+    )
+    affiliate_earnings_usd: Mapped[Decimal] = mapped_column(
+        sa.Numeric(12, 4), nullable=False, default=Decimal("0")
+    )
     created_at: Mapped[datetime] = _created_at()
 
     __table_args__ = (
@@ -637,6 +657,75 @@ class ContentPlan(Base):
         UUID, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = _created_at()
+
+
+# ---------------------------------------------------------------------------
+# Affiliate marketing — "we promote affiliate offers, we earn commissions"
+# ---------------------------------------------------------------------------
+
+
+class AffiliateProgram(Base):
+    """A third-party affiliate program whose offers the business promotes.
+
+    ``network`` is a free-form label (amazon, shareasale, cj, impact, direct,
+    other, ...). ``default_commission_pct`` is the fallback rate used when a
+    conversion postback does not carry an explicit commission amount.
+    """
+
+    __tablename__ = "affiliate_programs"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False, default="other")
+    website_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    default_commission_pct: Mapped[Decimal] = mapped_column(
+        sa.Numeric(6, 3), nullable=False, default=Decimal("0")
+    )
+    cookie_days: Mapped[Optional[int]] = mapped_column(sa.Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    notes: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    links: Mapped[list["AffiliateLink"]] = relationship(
+        back_populates="program", cascade="all, delete-orphan"
+    )
+
+
+class AffiliateLink(Base):
+    """A trackable affiliate link.
+
+    ``slug`` is unique per business and powers the public redirect
+    ``GET /r/{slug}``. ``destination_url`` already contains the business's
+    affiliate ID / tag. Clicks and conversions are recorded as
+    ``affiliate_clicked`` / ``affiliate_converted`` rows in ``events`` with
+    ``link_id`` (and ``program_id``, ``order_value_usd``, ``commission_usd``)
+    in the payload.
+    """
+
+    __tablename__ = "affiliate_links"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    program_id: Mapped[uuid.UUID] = mapped_column(
+        UUID, ForeignKey("affiliate_programs.id", ondelete="CASCADE"), nullable=False
+    )
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(128), nullable=False)
+    destination_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    utm_source: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    utm_medium: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    utm_campaign: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    program: Mapped["AffiliateProgram"] = relationship(back_populates="links")
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "business_id", "slug", name="uq_affiliate_links_biz_slug"
+        ),
+    )
 
 
 def to_dict(obj: Base) -> dict[str, Any]:

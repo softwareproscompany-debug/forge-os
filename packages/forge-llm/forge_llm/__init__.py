@@ -16,7 +16,14 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from forge_llm.brand import build_brand_system_prompt, check_guardrails
+from forge_llm.brand import (
+    AFFILIATE_DISCLOSURE,
+    build_brand_system_prompt,
+    check_guardrails,
+    ensure_affiliate_disclosure,
+    has_affiliate_disclosure,
+    looks_like_affiliate_content,
+)
 from forge_llm.costing import PRICES_USD_PER_MTOK, estimate_cost
 from forge_llm.prompts import (
     BUILTIN_TEMPLATE_NAMES,
@@ -76,6 +83,7 @@ def get_provider() -> LLMProvider:
 
 
 __all__ = [
+    "AFFILIATE_DISCLOSURE",
     "AnthropicProvider",
     "BUILTIN_TEMPLATE_NAMES",
     "GenerationRequest",
@@ -89,7 +97,10 @@ __all__ = [
     "build_brand_system_prompt",
     "check_guardrails",
     "default_registry",
+    "ensure_affiliate_disclosure",
     "estimate_cost",
     "get_provider",
+    "has_affiliate_disclosure",
+    "looks_like_affiliate_content",
     "render",
 ]

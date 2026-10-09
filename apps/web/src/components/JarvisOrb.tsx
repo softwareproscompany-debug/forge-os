@@ -169,86 +169,90 @@ uniform vec3 uPalHot;
 uniform vec3 uPalEmber;
 uniform float uFlame;
 ${NOISE_GLSL}
-// Reference image is law: the orb is a sphere of WISPY SMOKE TENDRILS, not a
-// solid object. The center stays dark near-black and see-through; energy
-// lives in thin ridged filaments, a fragmented patchy limb, and faint amber
-// embers deep inside. No glossy ball, no uniform ring.
+// Reference image is law: a DENSE luminous blue-cyan energy sphere.
+// The hero feature is the BRIGHT plasma ring at the circumference —
+// electric cyan, near white-hot, slightly irregular but continuous.
+// Dense filaments swirl across the surface; the core stays dark navy
+// with amber flame streaks and violet tones deep inside.
 void main() {
   vec3 N = normalize(vNormal);
   vec3 V = normalize(cameraPosition - vWorldPos);
   float facing = max(dot(N, V), 0.0);
-  float fres = pow(1.0 - facing, 2.2);
+  float fres = pow(1.0 - facing, 2.0);
 
   // Slow organic drift, quickened by voice energy.
   float t = uTime * (0.45 + 0.85 * uLevel) * (0.6 + 0.4 * uTurb);
-  // Low base frequency: long sweeping tendrils, not marble veins.
-  vec3 q = vObjPos * 1.35;
-  vec3 warp = vec3(
-    fbm(q * 1.25 + vec3(0.0, t * 0.33, 1.7)),
-    fbm(q * 1.25 + vec3(4.7, 1.3, t * 0.26)),
-    fbm(q * 1.25 + vec3(9.1, 2.8, 3.7)));
-  vec3 p = q * 1.5 + warp * 3.4 + vec3(0.0, -t * 0.45, 0.0);
+  float energy = 0.9 + 1.1 * uLevel + 0.6 * uBass;
 
-  // Ridged noise -> thin smoke filaments. High thresholds keep them sparse:
-  // fbm clusters near 0.5, so only the very crest of each ridge survives.
+  // Swirl the domain around Y (latitude-dependent twist) so filaments
+  // wrap around the sphere as flowing ribbons, like the reference.
+  vec3 q = vObjPos * 1.5;
+  float ang = t * 0.35 + q.y * 2.4;
+  float ca = cos(ang), sa = sin(ang);
+  vec3 qs = vec3(ca * q.x - sa * q.z, q.y, sa * q.x + ca * q.z);
+
+  vec3 warp = vec3(
+    fbm(qs * 1.3 + vec3(0.0, t * 0.40, 1.7)),
+    fbm(qs * 1.3 + vec3(4.7, 1.3, t * 0.30)),
+    fbm(qs * 1.3 + vec3(9.1, 2.8, 3.7)));
+  vec3 p = qs * 1.6 + warp * 2.8;
+
+  // DENSE filaments: lower thresholds so coverage is rich, not sparse.
   float n1 = fbm(p);
   float ridge1 = 1.0 - abs(2.0 * n1 - 1.0);
-  float fil = pow(smoothstep(0.62, 0.995, ridge1), 2.5);
+  float fil = pow(smoothstep(0.48, 0.95, ridge1), 1.8);
 
-  // Finer second filament layer for detail.
-  float n2 = fbm(p * 2.35 + vec3(0.0, t * 0.6, 3.1));
+  // Second filament layer for detail.
+  float n2 = fbm(p * 2.2 + vec3(0.0, t * 0.7, 3.1));
   float ridge2 = 1.0 - abs(2.0 * n2 - 1.0);
-  float fil2 = pow(smoothstep(0.68, 0.995, ridge2), 2.5);
+  float fil2 = pow(smoothstep(0.52, 0.95, ridge2), 1.8);
 
-  // Bright knots where filaments fold.
-  float knots = pow(smoothstep(0.80, 1.0, ridge1), 6.0);
+  // White-hot knots where filaments cross.
+  float knots = pow(smoothstep(0.72, 1.0, ridge1), 4.0);
 
-  // Fragmented limb: patchy tendril clusters at the edge, never a ring.
-  float limbNoise = fbm(vObjPos * 3.3 + vec3(0.0, t * 0.2, 7.3));
-  float limbFrag = smoothstep(0.32, 0.85, limbNoise);
-  float limb = pow(fres, 1.7) * (0.2 + 0.8 * limbFrag);
+  // HERO PLASMA RING: bright electric cyan at the circumference.
+  // Noise-modulated for organic irregularity, but continuous and dominant.
+  float ringNoise = fbm(vObjPos * 4.0 + vec3(0.0, t * 0.25, 3.0));
+  float ringMod = 0.72 + 0.55 * ringNoise;
+  float ring = pow(fres, 1.35) * ringMod;
+  vec3 ringCol = mix(uPalEnergy * 1.35, vec3(1.0, 1.0, 1.0), 0.42)
+               * ring * 2.6 * energy * (0.55 + 0.45 * uGlow);
+  // White-hot inner edge of the ring.
+  ringCol += vec3(0.85, 1.0, 1.0) * pow(fres, 3.2) * 1.6 * energy;
 
-  vec3 cyan = uPalEnergy;
-  vec3 ice = uPalHot;
-  float energy = 0.7 + 0.9 * uLevel + 0.5 * uBass;
+  // Filament ribbons: bright cyan, visible across the whole disc,
+  // intensifying toward the limb.
+  float limbBoost = 0.55 + 0.45 * pow(fres, 1.2);
+  vec3 filCol = mix(uPalEnergy * 1.1, uPalHot, clamp(fil2 * 0.5 + knots * 0.9, 0.0, 1.0))
+              * (fil * 2.4 + fil2 * 1.5) * energy * limbBoost;
+  filCol += vec3(1.0, 1.0, 1.0) * knots * 2.8 * energy;
+  filCol += uPalHot * uHigh * 0.8 * fil;
 
-  // Filaments fade toward the disc center so the core stays dark; the limb
-  // carries the energy, like the reference.
-  float limbW = 0.18 + 0.82 * pow(fres, 1.6);
-  vec3 filCol = mix(cyan, ice, clamp(fil2 * 0.65 + knots * 0.8, 0.0, 1.0))
-              * (fil * 1.6 + fil2 * 1.0) * energy * limbW;
-  filCol += ice * knots * 1.7 * energy;
-  filCol += ice * uHigh * 0.55 * fil;
+  // Dark navy core with a violet/indigo wash away from the limb.
+  vec3 coreCol = mix(uPalDeep, vec3(0.10, 0.06, 0.22), 0.55 * (1.0 - fres));
 
-  vec3 limbCol = mix(cyan * 0.45, ice, limbFrag * 0.55)
-               * limb * (0.45 + 0.75 * uGlow) * energy;
+  // Amber flame streaks: elongated vertical wisps, biased to left/right
+  // of the disc like the reference, with slow flicker.
+  float streak = fbm(vec3(q.x * 1.1, q.y * 3.6, q.z * 1.1) + vec3(t * 0.35, 0.0, 1.0));
+  float streakMask = pow(smoothstep(0.52, 0.92, streak), 2.0) * (1.0 - fres);
+  float sideBias = smoothstep(0.12, 0.72, abs(normalize(vObjPos + vec3(0.0001)).x));
+  float flick = 0.60 + 0.40 * sin(uTime * 2.1 + vObjPos.y * 8.0 + vObjPos.x * 3.0);
+  vec3 amberCol = vec3(1.0, 0.52, 0.13) * streakMask * sideBias * flick * 1.1;
+  amberCol += vec3(1.0, 0.75, 0.35) * pow(streakMask, 2.0) * sideBias * 0.8;
 
-  // Dark see-through center: only the faintest deep smoke.
-  float smoke = fbm(q * 1.15 + warp * 0.8);
-  float bodyA = smoothstep(0.58, 0.96, smoke) * 0.04;
-  vec3 col = uPalDeep * bodyA;
-
-  // Amber embers deep inside: faint, offset, slow flicker.
-  float e1 = 1.0 - smoothstep(0.10, 0.55, length(vObjPos - vec3(-0.34, 0.03, 0.26)));
-  float e2 = 1.0 - smoothstep(0.08, 0.45, length(vObjPos - vec3(0.30, -0.20, -0.14)));
-  float flick = 0.55 + 0.45 * sin(uTime * 1.25 + vObjPos.y * 6.0 + vObjPos.x * 4.0);
-  float emberMask = smoothstep(0.30, 0.62, smoke);
-  vec3 emberCol = uPalEmber * (e1 * 0.5 + e2 * 0.38) * flick * 0.30 * emberMask;
-
-  vec3 add = filCol + limbCol + emberCol;
-  add = mix(add,
-            vec3(1.0, 0.42, 0.12) * (fil * 0.9 + limb * 0.6 + (e1 + e2) * 0.3),
+  vec3 col = coreCol * 0.5 + filCol * 0.8 + ringCol + amberCol;
+  col = mix(col,
+            vec3(1.0, 0.42, 0.12) * (fil * 0.9 + ring * 0.6 + streakMask * 0.4),
             uError * 0.65);
-  col += add;
 
   float alpha = clamp(
-      dot(filCol, vec3(0.333)) * 2.2
-    + dot(limbCol, vec3(0.333)) * 1.6
-    + (e1 * 0.5 + e2 * 0.38) * 0.35
-    + bodyA,
+      dot(filCol, vec3(0.333)) * 1.1
+    + dot(ringCol, vec3(0.333)) * 1.15
+    + dot(amberCol, vec3(0.333)) * 1.4
+    + 0.14,
     0.0, 1.0);
 
-  gl_FragColor = vec4(col * (0.4 + 0.6 * uGlow), alpha);
+  gl_FragColor = vec4(col * (0.55 + 0.45 * uGlow), alpha);
 }
 `;
 
@@ -301,20 +305,20 @@ void main() {
   vec3 V = normalize(cameraPosition - vWorldPos);
   float facing = abs(dot(N, V));
 
-  // Slightly stretched domain so tendrils elongate instead of blobbing.
-  vec3 q = vObjPos * vec3(2.5, 3.2, 2.5);
+  // Elongated domain: tendrils stretch outward like flames, not blobs.
+  vec3 q = vObjPos * vec3(2.2, 3.8, 2.2);
   float rise = 0.30 + 0.35 * uFlame;
   float w = fbm(q * 1.4 + vec3(0.0, -uTime * (0.22 + 0.25 * uFlame) * uTurb, uTime * 0.05 * uTurb));
   float s = fbm(q + 1.8 * w + vec3(0.0, -uTime * rise * uTurb, 0.0));
   float ridge = 1.0 - abs(2.0 * s - 1.0);
-  float wisps = pow(smoothstep(0.58, 0.95, ridge), 5.0);
+  float wisps = pow(smoothstep(0.52, 0.95, ridge), 4.0);
   // Fine strands nested inside the wisps.
   float s2 = fbm(q * 2.1 + 1.2 * w + vec3(2.0, -uTime * rise * 1.4 * uTurb, 1.0));
   float ridge2 = 1.0 - abs(2.0 * s2 - 1.0);
-  float strands = pow(smoothstep(0.62, 1.0, ridge2), 7.0);
+  float strands = pow(smoothstep(0.55, 1.0, ridge2), 6.0);
 
-  float a = (wisps * 0.8 + strands * 0.55) * uAlpha * (0.30 + 0.70 * facing) * (0.65 + 0.65 * uLevel);
-  vec3 col = mix(uPalSmokeA, uPalSmokeB, clamp(wisps + strands * 0.5, 0.0, 1.0));
+  float a = (wisps * 1.1 + strands * 0.7) * uAlpha * (0.30 + 0.70 * facing) * (0.65 + 0.65 * uLevel);
+  vec3 col = mix(uPalSmokeA * 1.2, uPalSmokeB * 1.2, clamp(wisps + strands * 0.5, 0.0, 1.0));
   gl_FragColor = vec4(col * a, a);
 }
 `;
@@ -581,8 +585,8 @@ export function JarvisOrb(props: JarvisOrbProps) {
     // Layer 2b: smoke coronas (wispy tendrils breaking the silhouette).
     const coronas: { mesh: THREE.Mesh; spin: number }[] = [];
     [
-      { scale: 1.18, alpha: 0.6, spin: -0.35 },
-      { scale: 1.42, alpha: 0.3, spin: 0.22 },
+      { scale: 1.28, alpha: 0.75, spin: -0.35 },
+      { scale: 1.58, alpha: 0.42, spin: 0.22 },
     ].forEach((c) => {
       const mat = new THREE.ShaderMaterial({
         vertexShader: SMOKE_VERT,

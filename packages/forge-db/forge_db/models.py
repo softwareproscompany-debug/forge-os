@@ -60,6 +60,11 @@ __all__ = [
     "AutopilotSettings",
     "GenerationLog",
     "DevOutbox",
+    "InterviewStatus",
+    "PlanStatus",
+    "InterviewSession",
+    "WeeklySummary",
+    "ContentPlan",
 ]
 
 
@@ -169,6 +174,18 @@ class SendStatus(str, enum.Enum):
 
 
 class ApprovalDecision(str, enum.Enum):
+    approved = "approved"
+    rejected = "rejected"
+
+
+class InterviewStatus(str, enum.Enum):
+    active = "active"
+    completed = "completed"
+    abandoned = "abandoned"
+
+
+class PlanStatus(str, enum.Enum):
+    draft = "draft"
     approved = "approved"
     rejected = "rejected"
 
@@ -521,6 +538,104 @@ class DevOutbox(Base):
     subject: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
     body: Mapped[str] = mapped_column(sa.Text, nullable=False)
     provider: Mapped[str] = mapped_column(String(64), nullable=False, default="stub")
+    created_at: Mapped[datetime] = _created_at()
+
+
+# ---------------------------------------------------------------------------
+# Card 0 / Card 4 / Card 5 — interviews, weekly summaries, content plans
+# ---------------------------------------------------------------------------
+
+
+class InterviewSession(Base):
+    """Card 0 guided interview. One row per interview attempt.
+
+    ``answers`` is a list of ``{"question": str, "answer": str,
+    "followup": bool}`` in asked order. ``finish`` drafts the brand kit into
+    ``draft_brand_kit`` (JSON shaped like a BrandKit payload); ``confirm``
+    persists it as a real BrandKit row and links ``brand_kit_id``.
+    """
+
+    __tablename__ = "interview_sessions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[InterviewStatus] = mapped_column(
+        _enum_col(InterviewStatus), nullable=False, default=InterviewStatus.active
+    )
+    current_index: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
+    answers: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    draft_brand_kit: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    brand_kit_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("brand_kits.id", ondelete="SET NULL"), nullable=True
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class WeeklySummary(Base):
+    """Card 5 weekly evidence summary. One row per (business, week_start).
+
+    ``week_start`` is the Monday (date) of the week summarized. ``top_assets``
+    / ``bottom_assets`` are lists of ``{"asset_id", "title", "kind",
+    "delivered", "converted", "conversion_rate"}``. ``best_channel_per_segment``
+    maps a contact-tag segment (or ``"untagged"``) to ``{"channel",
+    "conversion_rate", "delivered"}``. ``recommendation`` is the
+    "do more of this" paragraph the Origination brief reads.
+    """
+
+    __tablename__ = "weekly_summaries"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    week_start: Mapped[datetime.date] = mapped_column(sa.Date, nullable=False)
+    top_assets: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    bottom_assets: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    best_channel_per_segment: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    recommendation: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.UniqueConstraint("business_id", "week_start", name="uq_weekly_summaries_biz_week"),
+    )
+
+
+class ContentPlan(Base):
+    """Card 4 autopilot weekly content plan. Drafted Monday 06:00, approved
+    by a human, then materialized into a scheduled campaign.
+
+    ``week_start`` is the target Monday (date). ``items`` is a list of
+    ``{"kind", "channel", "day" (0=Monday), "title", "brief", "asset_id"?}``.
+    Approving a draft creates the campaign and links ``campaign_id``.
+    """
+
+    __tablename__ = "content_plans"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    week_start: Mapped[datetime.date] = mapped_column(sa.Date, nullable=False)
+    status: Mapped[PlanStatus] = mapped_column(
+        _enum_col(PlanStatus), nullable=False, default=PlanStatus.draft
+    )
+    items: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    campaign_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID, ForeignKey("campaigns.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = _created_at()
 
 

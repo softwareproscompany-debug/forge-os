@@ -51,6 +51,7 @@ from forge_db.models import (  # noqa: E402
 from worker import jobs  # noqa: E402
 from worker.jobs import (  # noqa: E402
     _tick_campaign,
+    autopilot_plan,
     campaign_tick,
     generate_asset,
     handle_event,
@@ -812,11 +813,25 @@ class TestWorkerSettings:
             "send_message",
             "campaign_tick",
             "handle_event",
+            "autopilot_plan",
+            "weekly_summary",
         }
-        assert len(WorkerSettings.cron_jobs) == 1
+        assert len(WorkerSettings.cron_jobs) == 3
         cron_job = WorkerSettings.cron_jobs[0]
         assert cron_job.coroutine is campaign_tick
         # every minute of the hour
         assert cron_job.minute == set(range(60))
+        plan_cron = WorkerSettings.cron_jobs[1]
+        assert plan_cron.coroutine is autopilot_plan
+        # hourly, on the hour: the job itself gates on each business's
+        # local Monday 06:00, so it must wake every hour to cover timezones.
+        # minute={0} is load-bearing — arq treats an omitted minute as a
+        # wildcard (every minute).
+        assert plan_cron.hour == set(range(24))
+        assert plan_cron.minute == {0}
+        summary_cron = WorkerSettings.cron_jobs[2]
+        assert summary_cron.coroutine.__name__ == "weekly_summary"
+        assert summary_cron.hour == set(range(24))
+        assert summary_cron.minute == {0}
         assert WorkerSettings.queue_name == "forge"
         assert WorkerSettings.redis_settings.host  # parsed from REDIS_URL

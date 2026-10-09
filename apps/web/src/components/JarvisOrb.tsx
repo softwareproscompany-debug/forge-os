@@ -2,10 +2,12 @@
  * JarvisOrb — the cinematic Draven orb, built on Three.js per the master spec.
  *
  * Three.js scene graph (no hand-rolled matrix math):
- *   1. Energy core      — THREE.SphereGeometry + GLSL ShaderMaterial:
- *      domain-warped fbm smoke, ridged filament streams, fragmented fresnel
- *      rim, offset warm heart. The orb is smoke, not a solid object.
- *   2. Plasma shells    — two translucent fresnel shells (additive).
+ *   1. Tendril core     — THREE.SphereGeometry + GLSL ShaderMaterial:
+ *      domain-warped ridged-fbm smoke filaments (thin tendrils, never a
+ *      solid ball), fragmented patchy limb, dark see-through center,
+ *      faint amber ember pockets deep inside. Reference image is law.
+ *   2. Plasma shells    — two fresnel shells broken into drifting wisps
+ *      by noise (additive); never a smooth rim.
  *   3. Smoke coronas    — two larger wispy shells breaking the silhouette.
  *   4. Orbital geometry — three inclined arc Line loops at varied radii.
  *   5. Particle field   — THREE.Points with GPU-orbit shader.
@@ -167,68 +169,86 @@ uniform vec3 uPalHot;
 uniform vec3 uPalEmber;
 uniform float uFlame;
 ${NOISE_GLSL}
+// Reference image is law: the orb is a sphere of WISPY SMOKE TENDRILS, not a
+// solid object. The center stays dark near-black and see-through; energy
+// lives in thin ridged filaments, a fragmented patchy limb, and faint amber
+// embers deep inside. No glossy ball, no uniform ring.
 void main() {
   vec3 N = normalize(vNormal);
   vec3 V = normalize(cameraPosition - vWorldPos);
   float facing = max(dot(N, V), 0.0);
-  float fres = pow(1.0 - facing, 2.6);
+  float fres = pow(1.0 - facing, 2.2);
 
-  float draft = 0.14 + 0.34 * uFlame;
-  vec3 q = vObjPos * 2.3;
+  // Slow organic drift, quickened by voice energy.
+  float t = uTime * (0.45 + 0.85 * uLevel) * (0.6 + 0.4 * uTurb);
+  // Low base frequency: long sweeping tendrils, not marble veins.
+  vec3 q = vObjPos * 1.35;
   vec3 warp = vec3(
-    fbm(q + vec3(0.0, uTime * (0.10 + 0.22 * uFlame) * uTurb, 0.0)),
-    fbm(q + vec3(5.2, 1.3, uTime * 0.08 * uTurb)),
-    fbm(q + vec3(9.1, 2.8, 3.7)));
-  float smoke = fbm(q * 1.6 + 3.4 * warp + vec3(0.0, -uTime * draft * uTurb, 0.0));
+    fbm(q * 1.25 + vec3(0.0, t * 0.33, 1.7)),
+    fbm(q * 1.25 + vec3(4.7, 1.3, t * 0.26)),
+    fbm(q * 1.25 + vec3(9.1, 2.8, 3.7)));
+  vec3 p = q * 1.5 + warp * 3.4 + vec3(0.0, -t * 0.45, 0.0);
 
-  float r1 = 1.0 - abs(2.0 * fbm(vObjPos * 4.2 + warp * 2.2 + vec3(uTime * 0.22 * uTurb, 0.0, 0.0)) - 1.0);
-  float fil = pow(r1, 7.0);
+  // Ridged noise -> thin smoke filaments. High thresholds keep them sparse:
+  // fbm clusters near 0.5, so only the very crest of each ridge survives.
+  float n1 = fbm(p);
+  float ridge1 = 1.0 - abs(2.0 * n1 - 1.0);
+  float fil = pow(smoothstep(0.62, 0.995, ridge1), 2.5);
 
-  vec3 deep  = uPalDeep;
-  vec3 cyan  = uPalEnergy;
-  vec3 ice   = uPalHot;
-  vec3 ember = uPalEmber;
+  // Finer second filament layer for detail.
+  float n2 = fbm(p * 2.35 + vec3(0.0, t * 0.6, 3.1));
+  float ridge2 = 1.0 - abs(2.0 * n2 - 1.0);
+  float fil2 = pow(smoothstep(0.68, 0.995, ridge2), 2.5);
 
-  // THE ORB IS SMOKE, NOT A SOLID OBJECT (reference image is law): the
-  // center stays dark near-black and see-through. Only the faintest whisper
-  // of deep color where the smoke is densest. All energy is additive:
-  // thin filaments, a fragmented patchy rim, and a faint offset warm heart.
-  float bodyA = smoothstep(0.62, 0.97, smoke) * 0.05;
-  vec3 col = deep * bodyA;
+  // Bright knots where filaments fold.
+  float knots = pow(smoothstep(0.80, 1.0, ridge1), 6.0);
 
-  vec3 filCol = mix(cyan, ice, 0.55) * fil * (0.9 + 0.8 * uLevel + 0.6 * uBass);
-  float trav = 0.5 + 0.5 * sin(vObjPos.x * 3.0 + vObjPos.y * 4.0 - uTime * 1.4);
-  filCol += cyan * smoothstep(0.88, 1.0, trav) * fil * 0.35;
-  filCol += ice * uHigh * 0.22 * fil;
+  // Fragmented limb: patchy tendril clusters at the edge, never a ring.
+  float limbNoise = fbm(vObjPos * 3.3 + vec3(0.0, t * 0.2, 7.3));
+  float limbFrag = smoothstep(0.32, 0.85, limbNoise);
+  float limb = pow(fres, 1.7) * (0.2 + 0.8 * limbFrag);
 
-  float rimNoise = fbm(vObjPos * 5.0 + vec3(0.0, uTime * 0.15 * uTurb, 2.0));
-  // Sharpened so bright patches concentrate like the reference — never a
-  // uniform ring or glossy ball edge.
-  float rimFrag = smoothstep(0.45, 0.9, rimNoise);
-  vec3 rimCol = mix(cyan * 0.22, mix(cyan, ice, 0.55), rimFrag * rimFrag)
-              * pow(fres, 1.6) * (0.45 + 0.75 * uGlow);
+  vec3 cyan = uPalEnergy;
+  vec3 ice = uPalHot;
+  float energy = 0.7 + 0.9 * uLevel + 0.5 * uBass;
 
-  float heartD = length(vObjPos - vec3(-0.38, 0.05, 0.28));
-  float heart = smoothstep(0.60, 0.12, heartD) * smoothstep(0.35, 0.65, smoke);
-  vec3 heartCol = ember * heart * 0.22;
+  // Filaments fade toward the disc center so the core stays dark; the limb
+  // carries the energy, like the reference.
+  float limbW = 0.18 + 0.82 * pow(fres, 1.6);
+  vec3 filCol = mix(cyan, ice, clamp(fil2 * 0.65 + knots * 0.8, 0.0, 1.0))
+              * (fil * 0.8 + fil2 * 0.5) * energy * limbW;
+  filCol += ice * knots * 0.85 * energy;
+  filCol += ice * uHigh * 0.28 * fil;
 
-  vec3 add = filCol + rimCol + heartCol;
-  vec3 heartCol = ember * heart * 0.38;
+  vec3 limbCol = mix(cyan * 0.45, ice, limbFrag * 0.55)
+               * limb * (0.45 + 0.75 * uGlow) * energy;
 
-  vec3 add = filCol + rimCol + heartCol;
+  // Dark see-through center: only the faintest deep smoke.
+  float smoke = fbm(q * 1.15 + warp * 0.8);
+  float bodyA = smoothstep(0.58, 0.96, smoke) * 0.04;
+  vec3 col = uPalDeep * bodyA;
+
+  // Amber embers deep inside: faint, offset, slow flicker.
+  float e1 = 1.0 - smoothstep(0.10, 0.55, length(vObjPos - vec3(-0.34, 0.03, 0.26)));
+  float e2 = 1.0 - smoothstep(0.08, 0.45, length(vObjPos - vec3(0.30, -0.20, -0.14)));
+  float flick = 0.55 + 0.45 * sin(uTime * 1.25 + vObjPos.y * 6.0 + vObjPos.x * 4.0);
+  float emberMask = smoothstep(0.30, 0.62, smoke);
+  vec3 emberCol = uPalEmber * (e1 * 0.5 + e2 * 0.38) * flick * 0.30 * emberMask;
+
+  vec3 add = filCol + limbCol + emberCol;
   add = mix(add,
-            vec3(1.0, 0.42, 0.12) * (fil * 0.9 + pow(fres, 1.6) * 0.6 + heart * 0.4),
+            vec3(1.0, 0.42, 0.12) * (fil * 0.9 + limb * 0.6 + (e1 + e2) * 0.3),
             uError * 0.65);
   col += add;
 
   float alpha = clamp(
-    dot(filCol, vec3(0.33)) * 1.1
-    + dot(rimCol, vec3(0.33)) * 0.9
-    + heart * 0.32
+      dot(filCol, vec3(0.333)) * 1.15
+    + dot(limbCol, vec3(0.333)) * 1.0
+    + (e1 * 0.5 + e2 * 0.38) * 0.22
     + bodyA,
     0.0, 1.0);
 
-  gl_FragColor = vec4(col * (0.35 + 0.55 * uGlow), alpha);
+  gl_FragColor = vec4(col * (0.4 + 0.6 * uGlow), alpha);
 }
 `;
 
@@ -247,13 +267,19 @@ const SHELL_FRAG = `
 precision mediump float;
 varying vec3 vNormal;
 varying vec3 vWorldPos;
+uniform float uTime;
 uniform float uAlpha;
 uniform vec3 uTint;
+${NOISE_GLSL}
 void main() {
   vec3 N = normalize(vNormal);
   vec3 V = normalize(cameraPosition - vWorldPos);
   float fres = pow(1.0 - abs(dot(N, V)), 3.0);
-  gl_FragColor = vec4(uTint * fres, fres * uAlpha);
+  // Break the shell into drifting wisps — never a smooth billiard-ball rim.
+  float brk = fbm(vWorldPos * 3.6 + vec3(0.0, uTime * 0.12, 4.2));
+  float wisps = smoothstep(0.34, 0.8, brk);
+  float a = fres * uAlpha * wisps;
+  gl_FragColor = vec4(uTint * a, a);
 }
 `;
 
@@ -275,15 +301,20 @@ void main() {
   vec3 V = normalize(cameraPosition - vWorldPos);
   float facing = abs(dot(N, V));
 
-  vec3 q = vObjPos * 2.8;
+  // Slightly stretched domain so tendrils elongate instead of blobbing.
+  vec3 q = vObjPos * vec3(2.5, 3.2, 2.5);
   float rise = 0.30 + 0.35 * uFlame;
   float w = fbm(q * 1.4 + vec3(0.0, -uTime * (0.22 + 0.25 * uFlame) * uTurb, uTime * 0.05 * uTurb));
   float s = fbm(q + 1.8 * w + vec3(0.0, -uTime * rise * uTurb, 0.0));
   float ridge = 1.0 - abs(2.0 * s - 1.0);
-  float wisps = pow(smoothstep(0.45, 0.95, ridge), 3.0);
+  float wisps = pow(smoothstep(0.40, 0.95, ridge), 5.0);
+  // Fine strands nested inside the wisps.
+  float s2 = fbm(q * 2.1 + 1.2 * w + vec3(2.0, -uTime * rise * 1.4 * uTurb, 1.0));
+  float ridge2 = 1.0 - abs(2.0 * s2 - 1.0);
+  float strands = pow(smoothstep(0.45, 1.0, ridge2), 7.0);
 
-  float a = wisps * uAlpha * (0.30 + 0.70 * facing) * (0.65 + 0.65 * uLevel);
-  vec3 col = mix(uPalSmokeA, uPalSmokeB, wisps);
+  float a = (wisps * 0.8 + strands * 0.55) * uAlpha * (0.30 + 0.70 * facing) * (0.65 + 0.65 * uLevel);
+  vec3 col = mix(uPalSmokeA, uPalSmokeB, clamp(wisps + strands * 0.5, 0.0, 1.0));
   gl_FragColor = vec4(col * a, a);
 }
 `;
@@ -530,6 +561,7 @@ export function JarvisOrb(props: JarvisOrbProps) {
         vertexShader: SHELL_VERT,
         fragmentShader: SHELL_FRAG,
         uniforms: {
+          uTime: { value: 0 },
           uAlpha: { value: si === 0 ? 0.28 : 0.12 },
           uTint: { value: v3(pal.energy) },
         },
@@ -768,7 +800,9 @@ export function JarvisOrb(props: JarvisOrbProps) {
       // Shells + coronas
       shells.forEach((m, si) => {
         m.rotation.y = spin * (si + 1) * 0.6;
-        (m.material as THREE.ShaderMaterial).uniforms.uAlpha.value =
+        const su = (m.material as THREE.ShaderMaterial).uniforms;
+        su.uTime.value = t;
+        su.uAlpha.value =
           (si === 0 ? 0.28 : 0.12) * (0.5 + 0.5 * cur.coreGlow);
       });
       coronas.forEach(({ mesh }, ci) => {

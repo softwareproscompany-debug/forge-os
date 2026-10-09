@@ -7,6 +7,12 @@ Providers:
   prompt always yields the same output. Reports zero cost.
 * :class:`AnthropicProvider` — calls the Anthropic Messages API via the official
   ``anthropic`` SDK (async client). Requires ``ANTHROPIC_API_KEY``.
+* :class:`GeminiProvider` — calls the Google Generative Language REST API
+  (``generateContent``) via httpx. Requires ``GEMINI_API_KEY``.
+* :class:`OpenRouterProvider` — OpenRouter's OpenAI-compatible endpoint
+  (one key, many models). Requires ``OPENROUTER_API_KEY`` + ``OPENROUTER_MODEL``.
+* :class:`OllamaProvider` — a local/custom Ollama server via its
+  OpenAI-compatible ``/v1`` endpoint. Requires ``OLLAMA_MODEL``; no key needed.
 * :class:`OpenAICompatibleProvider` — POSTs OpenAI-style ``/chat/completions``
   payloads to any compatible endpoint (``OPENAI_COMPAT_BASE_URL``).
 """
@@ -186,6 +192,7 @@ class OpenAICompatibleProvider:
         api_key: str | None = None,
         model: str | None = None,
         client: httpx.AsyncClient | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         resolved_base = (
             base_url if base_url is not None else _get_env("OPENAI_COMPAT_BASE_URL")
@@ -205,11 +212,13 @@ class OpenAICompatibleProvider:
         self.model = resolved_model
         self._api_key = api_key if api_key is not None else _get_env("OPENAI_COMPAT_API_KEY")
         self._client = client
+        self._extra_headers = dict(extra_headers or {})
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
+        headers.update(self._extra_headers)
         return headers
 
     async def generate(self, req: "GenerationRequest") -> "GenerationResult":
@@ -261,4 +270,168 @@ class OpenAICompatibleProvider:
             tokens_out=tokens_out,
             cost_usd=estimate_cost(self.model, tokens_in, tokens_out),
             latency_ms=latency_ms,
+        )
+
+
+class GeminiProvider:
+    """Google Gemini via the native Generative Language REST API (httpx).
+
+    POSTs to ``/v1beta/models/{model}:generateContent`` with the API key as a
+    query parameter, per Google's API contract. Requires ``GEMINI_API_KEY``
+    (or an explicit ``api_key``); model defaults to ``gemini-3.5-flash-lite``
+    (``GEMINI_MODEL`` env override).
+    """
+
+    name = "gemini"
+    _BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        key = api_key if api_key is not None else _get_env("GEMINI_API_KEY")
+        if not key:
+            raise ValueError(
+                "GEMINI_API_KEY is not set. Set it to your Google AI Studio API key "
+                "to use LLM_PROVIDER=gemini."
+            )
+        self._api_key = key
+        self.model = (
+            model if model is not None else _get_env("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        )
+        if not self.model:
+            raise ValueError("Gemini model must not be empty.")
+
+    async def generate(self, req: "GenerationRequest") -> "GenerationResult":
+        from forge_llm import GenerationResult
+
+        body: dict[str, Any] = {
+            "contents": [{"parts": [{"text": req.prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": req.max_tokens,
+                "temperature": req.temperature,
+            },
+        }
+        if req.system_prompt:
+            body["systemInstruction"] = {"parts": [{"text": req.system_prompt}]}
+        url = (
+            f"{self._BASE}/models/{self.model}:generateContent"
+            f"?key={self._api_key}"
+        )
+        started = time.perf_counter()
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(url, json=body)
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise RuntimeError(
+                        f"Gemini API call failed ({response.status_code}) "
+                        f"(model={self.model}): {response.text[:500]}"
+                    ) from exc
+                data = response.json()
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Gemini API request failed: {exc}") from exc
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        text = ""
+        for candidate in data.get("candidates") or []:
+            for part in ((candidate.get("content") or {}).get("parts") or []):
+                if isinstance(part.get("text"), str):
+                    text += part["text"]
+            if text:
+                break
+        usage = data.get("usageMetadata") or {}
+        tokens_in = int(usage.get("promptTokenCount") or 0)
+        tokens_out = int(usage.get("candidatesTokenCount") or 0)
+        return GenerationResult(
+            text=text,
+            provider=self.name,
+            model=self.model,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=estimate_cost(self.model, tokens_in, tokens_out),
+            latency_ms=latency_ms,
+        )
+
+
+class OpenRouterProvider(OpenAICompatibleProvider):
+    """OpenRouter (https://openrouter.ai) — one API key, many models.
+
+    Speaks the OpenAI ``/chat/completions`` protocol against OpenRouter's
+    endpoint and sends OpenRouter's recommended ``HTTP-Referer``/``X-Title``
+    headers. Requires ``OPENROUTER_API_KEY`` and ``OPENROUTER_MODEL``
+    (e.g. ``anthropic/claude-sonnet-4`` or ``google/gemini-2.0-flash-001``).
+    """
+
+    name = "openrouter"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        key = api_key if api_key is not None else _get_env("OPENROUTER_API_KEY")
+        if not key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is not set. Set it to your OpenRouter API key "
+                "to use LLM_PROVIDER=openrouter."
+            )
+        resolved_model = model if model is not None else _get_env("OPENROUTER_MODEL")
+        if not resolved_model:
+            raise ValueError(
+                "OPENROUTER_MODEL is not set. Set it to the OpenRouter model id "
+                "(e.g. anthropic/claude-sonnet-4)."
+            )
+        super().__init__(
+            base_url=(
+                base_url
+                if base_url is not None
+                else _get_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+            ),
+            api_key=key,
+            model=resolved_model,
+            client=client,
+            extra_headers={
+                "HTTP-Referer": "https://forgeos.app",
+                "X-Title": "ForgeOS",
+            },
+        )
+
+
+class OllamaProvider(OpenAICompatibleProvider):
+    """Ollama local/custom LLM server via its OpenAI-compatible endpoint.
+
+    Points at ``OLLAMA_BASE_URL`` (default ``http://localhost:11434/v1``) and
+    requires ``OLLAMA_MODEL`` (the pulled model name, e.g. ``llama3.1``).
+    No API key is needed. NOTE: on hosted deployments ``localhost`` is the
+    *server*, not your machine — set ``OLLAMA_BASE_URL`` to a reachable
+    Ollama instance (tunnel, Tailscale IP, or LAN host).
+    """
+
+    name = "ollama"
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        model: str | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        resolved_base = (
+            base_url
+            if base_url is not None
+            else _get_env("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        )
+        if not resolved_base:
+            raise ValueError("Ollama base URL must not be empty.")
+        resolved_model = model if model is not None else _get_env("OLLAMA_MODEL")
+        if not resolved_model:
+            raise ValueError(
+                "OLLAMA_MODEL is not set. Set it to the model name served by "
+                "your Ollama instance (e.g. llama3.1)."
+            )
+        # Ollama needs no API key; pass api_key=None explicitly.
+        super().__init__(
+            base_url=resolved_base,
+            api_key=None,
+            model=resolved_model,
+            client=client,
         )

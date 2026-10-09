@@ -4,7 +4,8 @@ Provides a provider-agnostic interface for marketing-copy generation:
 
 * :class:`GenerationRequest` / :class:`GenerationResult` — the request/response contract
 * :func:`get_provider` — selects a provider from the ``LLM_PROVIDER`` env var
-* :mod:`forge_llm.providers` — ``stub`` / ``anthropic`` / ``openai_compatible`` providers
+* :mod:`forge_llm.providers` — ``stub`` / ``anthropic`` / ``gemini`` /
+  ``openrouter`` / ``ollama`` / ``openai_compatible`` providers
 * :mod:`forge_llm.prompts` — Jinja2 prompt-template registry with built-in templates
 * :mod:`forge_llm.brand` — brand-kit system prompts + guardrail checks
 * :mod:`forge_llm.costing` — per-model USD cost estimation
@@ -34,8 +35,11 @@ from forge_llm.prompts import (
 )
 from forge_llm.providers import (
     AnthropicProvider,
+    GeminiProvider,
     LLMProvider,
+    OllamaProvider,
     OpenAICompatibleProvider,
+    OpenRouterProvider,
     StubProvider,
 )
 
@@ -67,18 +71,26 @@ class GenerationResult:
 def get_provider() -> LLMProvider:
     """Return the configured :class:`LLMProvider`.
 
-    Reads ``LLM_PROVIDER`` (``stub`` | ``anthropic`` | ``openai_compatible``,
-    default ``stub``). Raises :class:`ValueError` for unknown values.
+    Reads ``LLM_PROVIDER`` (``stub`` | ``anthropic`` | ``gemini`` |
+    ``openrouter`` | ``ollama`` | ``openai_compatible``, default ``stub``).
+    Raises :class:`ValueError` for unknown values.
     """
     name = os.environ.get("LLM_PROVIDER", "stub").strip().lower()
     if name == "stub":
         return StubProvider()
     if name == "anthropic":
         return AnthropicProvider()
+    if name == "gemini":
+        return GeminiProvider()
+    if name == "openrouter":
+        return OpenRouterProvider()
+    if name == "ollama":
+        return OllamaProvider()
     if name == "openai_compatible":
         return OpenAICompatibleProvider()
     raise ValueError(
-        f"Unknown LLM_PROVIDER={name!r}; expected one of: stub, anthropic, openai_compatible"
+        "Unknown LLM_PROVIDER={!r}; expected one of: stub, anthropic, gemini, "
+        "openrouter, ollama, openai_compatible".format(name)
     )
 
 
@@ -86,10 +98,13 @@ __all__ = [
     "AFFILIATE_DISCLOSURE",
     "AnthropicProvider",
     "BUILTIN_TEMPLATE_NAMES",
+    "GeminiProvider",
     "GenerationRequest",
     "GenerationResult",
     "LLMProvider",
+    "OllamaProvider",
     "OpenAICompatibleProvider",
+    "OpenRouterProvider",
     "PRICES_USD_PER_MTOK",
     "PromptRegistry",
     "PromptRenderError",

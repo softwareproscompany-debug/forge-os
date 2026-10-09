@@ -22,9 +22,15 @@ class Settings(BaseSettings):
     WEBHOOK_SECRET: str = "dev-webhook-secret"
 
     # -- llm ---------------------------------------------------------------
-    LLM_PROVIDER: str = "stub"  # stub | anthropic | openai_compatible
+    LLM_PROVIDER: str = "stub"  # stub | anthropic | gemini | openrouter | ollama | openai_compatible
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-5-20250929"
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = ""
+    OLLAMA_BASE_URL: str = "http://localhost:11434/v1"
+    OLLAMA_MODEL: str = ""
     OPENAI_COMPAT_BASE_URL: str = ""
     OPENAI_COMPAT_API_KEY: str = ""
     OPENAI_COMPAT_MODEL: str = ""
@@ -63,6 +69,17 @@ class Settings(BaseSettings):
     # If empty, PUT /draven/provider fails closed (400) rather than storing
     # plaintext secrets.
     DRAVEN_CONFIG_KEY: str = ""
+
+    # -- market intelligence ------------------------------------------------
+    # DataForSEO API credentials for live keyword demand + Amazon product
+    # evidence (see docs/MARKET_DATA_SOURCES.md). When absent, the
+    # dataforseo connector reports "not configured" and research runs
+    # complete with explicit evidence gaps — never fabricated data.
+    # Get API access at https://dataforseo.com/ (pay-as-you-go).
+    DATAFORSEO_LOGIN: str = ""
+    DATAFORSEO_PASSWORD: str = ""
+    DATAFORSEO_LOCATION_CODE: int = 2840  # 2840 = United States
+    DATAFORSEO_LANGUAGE_CODE: str = "en"
 
 
 def get_settings() -> Settings:

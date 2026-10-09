@@ -12,6 +12,7 @@ import ApprovalsPage from "./pages/Approvals";
 import AssetsPage from "./pages/Assets";
 import AnalyticsPage from "./pages/Analytics";
 import OutboxPage from "./pages/Outbox";
+import OpsPage from "./pages/Ops";
 
 export default function App() {
   return (
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="/assets" element={<AssetsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/outbox" element={<OutboxPage />} />
+            <Route path="/ops" element={<OpsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

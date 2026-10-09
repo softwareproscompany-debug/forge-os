@@ -64,6 +64,8 @@ from forge_db.models import (
     Asset,
     AssetKind,
     AssetStatus,
+    AffiliateLink,
+    AffiliateProgram,
     AutopilotSettings,
     BrandKit,
     Business,
@@ -91,7 +93,9 @@ from forge_llm import (
     build_brand_system_prompt,
     check_guardrails,
     default_registry,
+    ensure_affiliate_disclosure,
     get_provider,
+    looks_like_affiliate_content,
 )
 
 from worker.timeutil import (
@@ -273,6 +277,43 @@ def _transition_asset(asset: Asset, target: AssetStatus) -> None:
         asset.status = step
 
 
+def _detect_affiliate_content(
+    db: Session, business_id: uuid.UUID, text: str
+) -> bool:
+    """Heuristic auto-detection of affiliate content in generated copy.
+
+    True when the text contains a ForgeOS short link (``/r/<slug>``) or the
+    domain of any of the business's affiliate-link destinations. Pure read;
+    cheap (affiliate tables are small).
+    """
+    if looks_like_affiliate_content(text):
+        return True
+    lowered = text.lower()
+    destinations = (
+        db.query(AffiliateLink.destination_url)
+        .filter(
+            AffiliateLink.business_id == business_id,
+            AffiliateLink.is_active.is_(True),
+        )
+        .all()
+    )
+    for (url,) in destinations:
+        host = _host_of(url)
+        if host and host in lowered:
+            return True
+    return False
+
+
+def _host_of(url: str) -> str:
+    """Lowercased host of ``url`` ("" when unparseable)."""
+    try:
+        from urllib.parse import urlsplit
+
+        return (urlsplit(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
 async def generate_asset(ctx: dict, asset_id: str) -> dict[str, Any]:
     """Generate copy for a draft asset via the configured LLM provider."""
     log.info("generate_asset start asset_id=%s", asset_id)
@@ -314,6 +355,10 @@ async def generate_asset(ctx: dict, asset_id: str) -> dict[str, Any]:
             "do_list": list(brand_kit.do_list) if brand_kit else [],
             "dont_list": list(brand_kit.dont_list) if brand_kit else [],
             "channel": KIND_TO_CHANNEL.get(asset.kind, ""),
+            # FTC disclosure guardrail: explicit flag on the asset; the
+            # worker additionally auto-detects /r/ short links and program
+            # URLs in the generated body (see below).
+            "is_affiliate_content": bool(asset.is_affiliate_content),
         }
 
         template_name = KIND_TO_PROMPT_TEMPLATE.get(asset.kind, "email_body")
@@ -352,7 +397,25 @@ async def generate_asset(ctx: dict, asset_id: str) -> dict[str, Any]:
                 "; ".join(violations),
             )
 
-        asset.body = result.text
+        # FTC disclosure guardrail: affiliate content ships with a disclosure
+        # line. The flag may be explicit on the asset or auto-detected from
+        # the generated body (/r/ short links or an affiliate program's URL).
+        body_text = result.text
+        if not brand["is_affiliate_content"]:
+            brand["is_affiliate_content"] = _detect_affiliate_content(
+                db, asset.business_id, body_text
+            )
+        if brand["is_affiliate_content"]:
+            body_text, appended = ensure_affiliate_disclosure(body_text)
+            if appended:
+                note = (
+                    "Missing affiliate disclosure: FTC disclosure line "
+                    "auto-appended to the body"
+                )
+                violations.append(note)
+                log.warning("generate_asset: %s for asset %s", note, asset_id)
+
+        asset.body = body_text
         asset.tokens_in = result.tokens_in
         asset.tokens_out = result.tokens_out
         asset.cost_usd = Decimal(str(result.cost_usd))
@@ -1533,8 +1596,90 @@ def _weekly_segment_best(
     }
 
 
-def _weekly_channel_totals(
+#: Minimum clicks for an affiliate link to rank in the weekly top list.
+_AFFILIATE_MIN_CLICKS = 5
+
+#: How many affiliate links appear in the weekly top list.
+_AFFILIATE_LIST_SIZE = 3
+
+
+def _weekly_affiliate_stats(
     db: Session, business_id: uuid.UUID, since: datetime, until: datetime
+) -> tuple[list[dict[str, Any]], Decimal]:
+    """Affiliate evidence for the week: top links + total earnings.
+
+    Reads ``affiliate_clicked`` / ``affiliate_converted`` events in the
+    window (link ids live in the event payload). Returns
+    ``(top_links, total_earnings_usd)`` where each top link is
+    ``{link_id, label, program_name, clicks, conversions, conversion_rate,
+    earnings_usd}`` — top 3 by conversion rate, only links with >= 5
+    clicks. Earnings sum ``commission_usd`` from conversion events.
+    """
+    links = {
+        str(row.id): row
+        for row in db.query(AffiliateLink)
+        .filter(AffiliateLink.business_id == business_id)
+        .all()
+    }
+    programs = {
+        str(row.id): row.name
+        for row in db.query(AffiliateProgram)
+        .filter(AffiliateProgram.business_id == business_id)
+        .all()
+    }
+
+    events = (
+        db.query(Event.kind, Event.payload)
+        .filter(
+            Event.business_id == business_id,
+            Event.kind.in_(["affiliate_clicked", "affiliate_converted"]),
+            Event.created_at >= as_naive_utc(since),
+            Event.created_at < as_naive_utc(until),
+        )
+        .all()
+    )
+    agg: dict[str, dict[str, Any]] = {}
+    total_earnings = Decimal("0")
+    for kind, payload in events:
+        payload = payload or {}
+        link_id = str(payload.get("link_id") or "")
+        if not link_id or link_id not in links:
+            continue
+        slot = agg.setdefault(
+            link_id, {"clicks": 0, "conversions": 0, "earnings": Decimal("0")}
+        )
+        if kind == "affiliate_clicked":
+            slot["clicks"] += 1
+        elif kind == "affiliate_converted":
+            slot["conversions"] += 1
+            try:
+                commission = Decimal(str(payload.get("commission_usd") or "0"))
+            except Exception:
+                commission = Decimal("0")
+            slot["earnings"] += commission
+            total_earnings += commission
+
+    entries: list[dict[str, Any]] = []
+    for link_id, slot in agg.items():
+        if slot["clicks"] < _AFFILIATE_MIN_CLICKS:
+            continue
+        link = links[link_id]
+        entries.append(
+            {
+                "link_id": link_id,
+                "label": link.label,
+                "program_name": programs.get(str(link.program_id), ""),
+                "clicks": slot["clicks"],
+                "conversions": slot["conversions"],
+                "conversion_rate": round(slot["conversions"] / slot["clicks"], 4),
+                "earnings_usd": float(slot["earnings"]),
+            }
+        )
+    entries.sort(key=lambda e: (-e["conversion_rate"], e["link_id"]))
+    return entries[:_AFFILIATE_LIST_SIZE], total_earnings
+
+
+def _weekly_channel_totals(    db: Session, business_id: uuid.UUID, since: datetime, until: datetime
 ) -> dict[str, tuple[int, int]]:
     """(delivered, converted) per channel over sends created in the window."""
     sends = (
@@ -1583,29 +1728,47 @@ def _stub_recommendation(
     bottom: list[dict[str, Any]],
     segments: dict[str, dict[str, Any]],
     channel_totals: dict[str, tuple[int, int]],
+    aff_links: list[dict[str, Any]] | None = None,
+    aff_earnings: Decimal | None = None,
 ) -> str:
     """Deterministic recommendation paragraph (stub provider path)."""
-    if not top:
+    if not top and not (aff_links or []):
         return (
             "No delivered sends in the last 7 days, so there is no engagement "
             "evidence to summarize. Generate and send content this week to feed "
             "next week's summary."
         )
-    best = top[0]
-    worst = bottom[0] if bottom else best
-    if segments:
-        seg_name = min(segments, key=lambda s: (-segments[s]["delivered"], s))
-        seg_line = f"Best channel for '{seg_name}' is {segments[seg_name]['channel']}."
-    else:
-        seg_line = "No segment had delivered sends this week."
-    top_kinds = ", ".join(dict.fromkeys(e["kind"] for e in top))
-    return (
-        f"Top performer: '{best['title']}' ({best['kind']}) converted at "
-        f"{_pct(best['conversion_rate'])} of delivered sends. "
-        f"Weakest: '{worst['title']}' at {_pct(worst['conversion_rate'])}. "
-        f"{seg_line} "
-        f"Do more of this: {top_kinds} via {_best_overall_channel(channel_totals)}."
-    )
+    parts: list[str] = []
+    if top:
+        best = top[0]
+        worst = bottom[0] if bottom else best
+        if segments:
+            seg_name = min(segments, key=lambda s: (-segments[s]["delivered"], s))
+            seg_line = f"Best channel for '{seg_name}' is {segments[seg_name]['channel']}."
+        else:
+            seg_line = "No segment had delivered sends this week."
+        top_kinds = ", ".join(dict.fromkeys(e["kind"] for e in top))
+        parts.append(
+            f"Top performer: '{best['title']}' ({best['kind']}) converted at "
+            f"{_pct(best['conversion_rate'])} of delivered sends. "
+            f"Weakest: '{worst['title']}' at {_pct(worst['conversion_rate'])}. "
+            f"{seg_line} "
+            f"Do more of this: {top_kinds} via {_best_overall_channel(channel_totals)}."
+        )
+    if aff_links:
+        star = aff_links[0]
+        earned = f"${float(aff_earnings or Decimal('0')):.2f}" if aff_earnings else "$0.00"
+        parts.append(
+            f"Affiliate: '{star['label']}' ({star['program_name']}) converted "
+            f"{star['conversions']}/{star['clicks']} clicks "
+            f"({_pct(star['conversion_rate'])}) — total affiliate earnings "
+            f"{earned} this week. Do more of this: feature this offer again."
+        )
+    elif aff_earnings and aff_earnings > 0:
+        parts.append(
+            f"Affiliate earnings this week: ${float(aff_earnings):.2f}."
+        )
+    return " ".join(parts)
 
 
 async def _recommendation_text(
@@ -1613,6 +1776,8 @@ async def _recommendation_text(
     bottom: list[dict[str, Any]],
     segments: dict[str, dict[str, Any]],
     channel_totals: dict[str, tuple[int, int]],
+    aff_links: list[dict[str, Any]] | None = None,
+    aff_earnings: Decimal | None = None,
 ) -> str:
     """Build the 'do more of this' paragraph.
 
@@ -1626,6 +1791,8 @@ async def _recommendation_text(
             "top_assets": top,
             "bottom_assets": bottom,
             "best_channel_per_segment": segments,
+            "top_affiliate_links": aff_links or [],
+            "affiliate_earnings_usd": float(aff_earnings or Decimal("0")),
         }
         try:
             result = await provider.generate(
@@ -1636,6 +1803,8 @@ async def _recommendation_text(
                         "marketing, grounded in last week's engagement stats "
                         "below. Name the top-performing asset, the weakest "
                         "asset, and the best channel per audience segment. "
+                        "If affiliate links converted, name the top "
+                        "affiliate offer too. "
                         "Keep it under 120 words.\n\n"
                         f"stats: {json.dumps(stats, default=str)}"
                     ),
@@ -1653,7 +1822,7 @@ async def _recommendation_text(
                 "weekly_summary: LLM recommendation failed; using stub template",
                 exc_info=True,
             )
-    return _stub_recommendation(top, bottom, segments, channel_totals)
+    return _stub_recommendation(top, bottom, segments, channel_totals, aff_links, aff_earnings)
 
 
 def _latest_summary_text(db: Session, business_id: uuid.UUID) -> str | None:
@@ -1662,12 +1831,24 @@ def _latest_summary_text(db: Session, business_id: uuid.UUID) -> str | None:
     Pure-ish (one read query, no writes) so tests can exercise it directly.
     Card 5's Origination wiring: :func:`generate_asset` appends this to the
     generation prompt so next week's drafts are shaped by last week's
-    evidence.
+    evidence. When affiliate links converted, the top offer is named so
+    the brief can say "do more of this".
     """
     summary = _latest_summary(db, business_id)
     if summary is None:
         return None
     text = (summary.recommendation or "").strip()
+    aff_links = list(summary.affiliate_top_links or [])
+    if aff_links:
+        star = aff_links[0]
+        label = star.get("label", "affiliate offer")
+        program = star.get("program_name") or "affiliate program"
+        rate = star.get("conversion_rate", 0)
+        text = (
+            (text + " " if text else "")
+            + f"Top affiliate offer: '{label}' ({program}) converted "
+            f"{rate * 100:.1f}% of its clicks — feature it again this week."
+        )
     return text or None
 
 
@@ -1717,7 +1898,10 @@ async def _summarize_business_if_due(
     top, bottom = _weekly_asset_entries(db, business.id, since, now)
     segments = _weekly_segment_best(db, business.id, since, now)
     channel_totals = _weekly_channel_totals(db, business.id, since, now)
-    recommendation = await _recommendation_text(top, bottom, segments, channel_totals)
+    aff_links, aff_earnings = _weekly_affiliate_stats(db, business.id, since, now)
+    recommendation = await _recommendation_text(
+        top, bottom, segments, channel_totals, aff_links, aff_earnings
+    )
     db.add(
         WeeklySummary(
             business_id=business.id,
@@ -1726,6 +1910,8 @@ async def _summarize_business_if_due(
             bottom_assets=bottom,
             best_channel_per_segment=segments,
             recommendation=recommendation,
+            affiliate_top_links=aff_links,
+            affiliate_earnings_usd=aff_earnings,
         )
     )
     log.info(

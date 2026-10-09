@@ -104,3 +104,23 @@ Memory never calls the Agent. The Agent never renders the Screen. Pulse
 only reads. That one-way discipline is what keeps the system debuggable:
 when something looks wrong on Screen, the cause is always traceable down
 through Pulse → Agent → Memory, never sideways.
+
+## FORGE layers × MAPS — affiliate (Reach addition)
+
+The FORGE framework (README) names five business layers; affiliate
+marketing lands in **Reach** with a foot in **Growth**:
+
+- **Reach** — affiliate links are a new distribution channel alongside
+  email/SMS/social: trackable short links (`GET /r/{slug}`, public 302
+  with click tracking), programs + links managed in the `/affiliates` UI,
+  and earnings computed honestly from stored events. Stubs-first like the
+  other channels: the whole loop works with zero network keys.
+- **Growth** — weekly affiliate evidence (`affiliate_top_links`,
+  `affiliate_earnings_usd` on `weekly_summaries`) feeds back into
+  Origination: the generation brief names the top-converting offer so the
+  business makes more of what already earns.
+- **Guardrail (Agent-side)** — affiliate content ships with an FTC
+  disclosure. The `is_affiliate_content` flag (API-set or auto-detected)
+  triggers `check_guardrails` disclosure matching, and `generate_asset`
+  auto-appends the disclosure rather than blocking — same pattern as the
+  email-unsubscribe rule.

@@ -249,3 +249,97 @@ def test_ops_activity_limit_validation(user_a):
     assert r.status_code == 422
     r = client.get("/api/v1/ops/activity?limit=500", headers=h)
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# brain (knowledge graph for the /brain views)
+# ---------------------------------------------------------------------------
+
+
+def test_ops_brain_shape_and_links(user_a):
+    token = user_a["token"]
+    h = _headers(token)
+    business_id = _business_id(token)
+    db = TestingSession()
+    try:
+        db.add(BrandKit(business_id=business_id, name="Voice"))
+        db.flush()
+        kit = db.query(BrandKit).filter(BrandKit.business_id == business_id).first()
+        asset = Asset(
+            business_id=business_id,
+            kind=AssetKind.email_copy,
+            title="Launch",
+            status=AssetStatus.approved,
+        )
+        db.add(asset)
+        db.flush()
+        contact = Contact(business_id=business_id, email="brain@example.com")
+        db.add(contact)
+        db.flush()
+        send = Send(
+            business_id=business_id,
+            contact_id=contact.id,
+            channel="email",
+            to_address="brain@example.com",
+            subject="Hi",
+            body="Hello",
+            status=SendStatus.sent,
+        )
+        db.add(send)
+        db.flush()
+        db.add(
+            Event(
+                business_id=business_id,
+                contact_id=contact.id,
+                kind="email_opened",
+                payload={"send_id": str(send.id)},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    r = client.get("/api/v1/ops/brain", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+
+    datetime.fromisoformat(body["as_of"])
+    assert [layer["key"] for layer in body["layers"]] == [
+        "foundation",
+        "origination",
+        "growth",
+        "reach",
+        "evidence",
+    ]
+    by_key = {layer["key"]: layer for layer in body["layers"]}
+    assert by_key["foundation"]["count"] == 1
+    assert by_key["origination"]["count"] == 1
+    assert by_key["reach"]["count"] == 1
+    assert by_key["evidence"]["count"] == 1
+    assert by_key["foundation"]["nodes"][0]["label"] == "Voice"
+
+    # brand kit -> asset link exists
+    kinds = {(link["source"][:2], link["target"][:2], link["kind"]) for link in body["links"]}
+    assert ("bk", "as", "brand") in kinds
+    # event -> send engagement link exists
+    assert ("se", "ev", "engagement") in kinds
+
+    # timeline carries the send + the mapped event kind
+    tl_kinds = {p["kind"] for p in body["timeline"]}
+    assert "sent" in tl_kinds
+    assert "opened" in tl_kinds
+
+
+def test_ops_brain_unauthenticated():
+    r = client.get("/api/v1/ops/brain")
+    assert r.status_code in (401, 403)
+
+
+def test_ops_brain_tenant_isolation(user_a, user_b):
+    # user_b's fresh business sees empty layers
+    r = client.get("/api/v1/ops/brain", headers=_headers(user_b["token"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert all(layer["count"] == 0 for layer in body["layers"])
+    assert body["links"] == []
+    assert body["timeline"] == []

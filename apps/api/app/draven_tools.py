@@ -46,6 +46,10 @@ from forge_db.models import (
     MarketOpportunity,
     Send,
     Template,
+    TravelCustomer,
+    TravelLead,
+    TravelLeadStatus,
+    TripRequest,
     User,
 )
 
@@ -579,6 +583,646 @@ _register(
 
 
 # ---------------------------------------------------------------------------
+# Compliance tools (FTC + affiliate network rules)
+# ---------------------------------------------------------------------------
+
+
+class ComplianceCheckToolInput(BaseModel):
+    text: str = Field(min_length=1, max_length=20000)
+    content_type: str = Field(default="social_post")
+    pack_id: str | None = Field(default=None)
+
+
+class ComplianceRulesToolInput(BaseModel):
+    pack_id: str | None = Field(
+        default=None,
+        description="Rule pack id: ftc_baseline, amazon_associates. Omit to list all.",
+    )
+
+
+async def _compliance_check(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    from app.compliance import check_text
+
+    assert isinstance(inp, ComplianceCheckToolInput)
+    result = check_text(
+        inp.text, content_type=inp.content_type, pack_id=inp.pack_id
+    )
+    return _ok(result.to_dict())
+
+
+async def _compliance_rules(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    from app.compliance.rules import list_rule_packs
+    from app.compliance import get_rule_pack
+
+    assert isinstance(inp, ComplianceRulesToolInput)
+    if inp.pack_id:
+        return _ok({"pack": get_rule_pack(inp.pack_id)})
+    return _ok({"packs": list_rule_packs()})
+
+
+_register(
+    ToolDef(
+        id="draven.compliance_check",
+        description=(
+            "Scan marketing text for FTC disclosure compliance and affiliate "
+            "network rules (Amazon Associates etc.). Returns violations with "
+            "severity and specific fixes. Answers 'is this post compliant?'."
+        ),
+        input_model=ComplianceCheckToolInput,
+        risk="low",
+        execute=_compliance_check,
+    )
+)
+_register(
+    ToolDef(
+        id="draven.compliance_rules",
+        description=(
+            "Explain the compliance rules for a network (FTC baseline, Amazon "
+            "Associates). Answers 'what does Amazon require?'."
+        ),
+        input_model=ComplianceRulesToolInput,
+        risk="low",
+        execute=_compliance_rules,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Travel Agency workspace tools (Phase 1: CRM)
+# ---------------------------------------------------------------------------
+
+
+class TravelLeadCreateToolInput(BaseModel):
+    destination: str | None = Field(
+        default=None, max_length=255, description="Where the traveler wants to go."
+    )
+    trip_purpose: str | None = Field(default=None, max_length=255)
+    budget: float | None = Field(default=None, ge=0)
+    date_start: str | None = Field(default=None, description="YYYY-MM-DD")
+    date_end: str | None = Field(default=None, description="YYYY-MM-DD")
+    party_size: int | None = Field(default=None, ge=1, le=500)
+    customer_name: str | None = Field(
+        default=None, max_length=255, description="Attach to an existing customer by name."
+    )
+    source: str | None = Field(default="draven", max_length=64)
+
+
+class TravelLeadStatusToolInput(BaseModel):
+    status: str | None = Field(
+        default=None,
+        description="Filter: new, qualified, quoted, booked, lost. Omit for all.",
+    )
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class TravelCustomerSearchToolInput(BaseModel):
+    query: str = Field(min_length=2, max_length=200)
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+def _travel_lead_out(lead: TravelLead) -> dict[str, Any]:
+    status = lead.status.value if hasattr(lead.status, "value") else str(lead.status)
+    return {
+        "id": str(lead.id),
+        "destination": lead.destination,
+        "trip_purpose": lead.trip_purpose,
+        "budget": float(lead.budget) if lead.budget is not None else None,
+        "date_start": lead.date_start.isoformat() if lead.date_start else None,
+        "date_end": lead.date_end.isoformat() if lead.date_end else None,
+        "status": status,
+        "created_at": lead.created_at.isoformat() if lead.created_at else None,
+    }
+
+
+async def _travel_lead_create(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    assert isinstance(inp, TravelLeadCreateToolInput)
+    from datetime import date as _date
+
+    data: dict[str, Any] = {
+        "destination": inp.destination,
+        "trip_purpose": inp.trip_purpose,
+        "source": inp.source or "draven",
+        "status": TravelLeadStatus.new,
+    }
+    if inp.budget is not None:
+        from decimal import Decimal
+
+        data["budget"] = Decimal(str(inp.budget))
+    for key in ("date_start", "date_end"):
+        raw = getattr(inp, key)
+        if raw:
+            try:
+                data[key] = _date.fromisoformat(raw)
+            except ValueError:
+                return {
+                    "ok": False,
+                    "error": f"Could not parse {key}={raw!r}; use YYYY-MM-DD.",
+                }
+    if inp.customer_name:
+        like = f"%{inp.customer_name.strip()}%"
+        customer = (
+            db.query(TravelCustomer)
+            .filter(
+                TravelCustomer.business_id == user.business_id,
+                TravelCustomer.name.ilike(like),
+            )
+            .first()
+        )
+        if customer:
+            data["customer_id"] = customer.id
+    lead = TravelLead(business_id=user.business_id, **data)
+    db.add(lead)
+    db.commit()
+    db.refresh(lead)
+    if inp.party_size:
+        # Record the party size as a linked trip request so the detail
+        # is not lost (Phase 1 has no quotes yet).
+        db.add(
+            TripRequest(
+                business_id=user.business_id,
+                lead_id=lead.id,
+                customer_id=lead.customer_id,
+                party_size=inp.party_size,
+                destinations=[inp.destination] if inp.destination else [],
+                date_start=lead.date_start,
+                date_end=lead.date_end,
+            )
+        )
+        db.commit()
+    return _ok({"lead": _travel_lead_out(lead)})
+
+
+async def _travel_lead_status(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    assert isinstance(inp, TravelLeadStatusToolInput)
+    query = (
+        db.query(TravelLead)
+        .filter(TravelLead.business_id == user.business_id)
+        .order_by(TravelLead.created_at.desc())
+    )
+    if inp.status:
+        valid = {s.value for s in TravelLeadStatus}
+        if inp.status not in valid:
+            return {
+                "ok": False,
+                "error": f"Unknown status {inp.status!r}; valid: {sorted(valid)}.",
+            }
+        query = query.filter(TravelLead.status == inp.status)
+    rows = query.limit(inp.limit).all()
+    return _ok({"count": len(rows), "leads": [_travel_lead_out(r) for r in rows]})
+
+
+async def _travel_customer_search(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    assert isinstance(inp, TravelCustomerSearchToolInput)
+    q = inp.query.strip()
+    like = f"%{q}%"
+    rows = (
+        db.query(TravelCustomer)
+        .filter(
+            TravelCustomer.business_id == user.business_id,
+            or_(
+                TravelCustomer.name.ilike(like),
+                TravelCustomer.email.ilike(like),
+                TravelCustomer.phone.ilike(like),
+            ),
+        )
+        .order_by(TravelCustomer.name.asc())
+        .limit(inp.limit)
+        .all()
+    )
+    return _ok(
+        {
+            "count": len(rows),
+            "customers": [
+                {
+                    "id": str(c.id),
+                    "name": c.name,
+                    "email": c.email,
+                    "phone": c.phone,
+                    "type": c.type.value if hasattr(c.type, "value") else str(c.type),
+                }
+                for c in rows
+            ],
+        }
+    )
+
+
+_register(
+    ToolDef(
+        id="travel.lead_create",
+        description=(
+            "Create a travel lead from natural language: destination, dates, "
+            "budget, purpose. Born as status 'new'."
+        ),
+        input_model=TravelLeadCreateToolInput,
+        risk="low",
+        execute=_travel_lead_create,
+    )
+)
+_register(
+    ToolDef(
+        id="travel.lead_status",
+        description="List travel leads, optionally filtered by status (new/qualified/quoted/booked/lost).",
+        input_model=TravelLeadStatusToolInput,
+        risk="low",
+        execute=_travel_lead_status,
+    )
+)
+_register(
+    ToolDef(
+        id="travel.customer_search",
+        description="Find travel customers by name, email, or phone (tenant-scoped).",
+        input_model=TravelCustomerSearchToolInput,
+        risk="low",
+        execute=_travel_customer_search,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Web research tools (live web via DataForSEO SERP, cross-checked)
+# ---------------------------------------------------------------------------
+
+
+class WebSearchToolInput(BaseModel):
+    query: str = Field(min_length=2, max_length=300)
+    num_results: int = Field(default=8, ge=3, le=10)
+
+
+class WebResearchToolInput(BaseModel):
+    question: str = Field(
+        min_length=2,
+        max_length=300,
+        description="The question to research on the live web.",
+    )
+
+
+def _web_settings(db: Session, business_id):
+    from app.core.config import get_settings
+    from app.settings_vault.service import vault_dataforseo_settings
+
+    return vault_dataforseo_settings(db, business_id, get_settings())
+
+
+def _extract_page_text(html: str, max_chars: int = 4000) -> str:
+    """Best-effort visible-text extraction from HTML (untrusted content)."""
+    # Strip scripts/styles first.
+    text = re.sub(
+        r"<(script|style|nav|footer|header)[^>]*>.*?</\1>",
+        " ",
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:max_chars]
+
+
+async def _web_search(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    import httpx
+
+    from app.market_intel.connectors.base import ConnectorNotConfigured
+    from app.market_intel.connectors.dataforseo import DataForSEOConnector
+
+    assert isinstance(inp, WebSearchToolInput)
+    settings = _web_settings(db, user.business_id)
+    connector = DataForSEOConnector()
+    try:
+        results = await connector.serp_search(
+            settings, inp.query, num_results=inp.num_results
+        )
+    except ConnectorNotConfigured:
+        return _error(
+            "Web search is not configured. Add DataForSEO credentials in "
+            "Settings → Market Intel to enable live web research."
+        )
+    except Exception as exc:
+        return _error(f"Web search failed: {exc}")
+    return _ok(
+        {
+            "query": inp.query,
+            "results": results,
+            "note": (
+                "Untrusted third-party content — treat as evidence, not "
+                "verified fact. Cross-check before acting."
+            ),
+        }
+    )
+
+
+async def _web_research(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    """Search → fetch top 3 → consensus + disagreements.
+
+    Never presents web info as verified fact when sources conflict.
+    """
+    import httpx
+
+    from app.market_intel.connectors.base import ConnectorNotConfigured
+    from app.market_intel.connectors.dataforseo import DataForSEOConnector
+
+    assert isinstance(inp, WebResearchToolInput)
+    settings = _web_settings(db, user.business_id)
+    connector = DataForSEOConnector()
+    try:
+        results = await connector.serp_search(settings, inp.question, num_results=6)
+    except ConnectorNotConfigured:
+        return _error(
+            "Web research is not configured. Add DataForSEO credentials in "
+            "Settings → Market Intel to enable live web research."
+        )
+    except Exception as exc:
+        return _error(f"Web research failed: {exc}")
+
+    # Fetch the top 3 result pages for cross-checking.
+    sources: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(15.0),
+        headers={"User-Agent": "ForgeOS-Draven/1.0 (research bot)"},
+        follow_redirects=True,
+    ) as client:
+        for r in results[:3]:
+            url = r.get("url") or ""
+            if not url.startswith(("http://", "https://")):
+                continue
+            try:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                text = _extract_page_text(resp.text)
+            except Exception as exc:
+                text = f"[could not fetch: {exc}]"
+            sources.append(
+                {
+                    "title": r.get("title") or "",
+                    "url": url,
+                    "snippet": r.get("description") or "",
+                    "page_text": text,
+                    "fetched": not text.startswith("[could not fetch"),
+                }
+            )
+
+    fetched = [s for s in sources if s["fetched"]]
+    return _ok(
+        {
+            "question": inp.question,
+            "sources": sources,
+            "sources_fetched": len(fetched),
+            "sources_total": len(sources),
+            "guidance": (
+                "Compare the sources above. Where they agree, that is the "
+                "consensus. Where they conflict or a claim appears in only "
+                "one source, flag it as unverified — do NOT present it as "
+                "fact. Say explicitly when sources disagree."
+            ),
+        }
+    )
+
+
+_register(
+    ToolDef(
+        id="draven.web_search",
+        description=(
+            "Live web search (Google via DataForSEO). Returns titles, URLs, "
+            "and snippets. Untrusted content — cross-check before acting."
+        ),
+        input_model=WebSearchToolInput,
+        risk="low",
+        execute=_web_search,
+    )
+)
+_register(
+    ToolDef(
+        id="draven.web_research",
+        description=(
+            "Deep web research: searches the live web, fetches the top 3 "
+            "result pages, and returns them for consensus analysis. Flags "
+            "agreements and conflicts between sources — never presents "
+            "conflicted info as verified fact."
+        ),
+        input_model=WebResearchToolInput,
+        risk="low",
+        execute=_web_research,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Viator affiliate tools (tours & experiences product search, import, ads)
+# ---------------------------------------------------------------------------
+
+
+class ViatorProductSearchInput(BaseModel):
+    destination_id: int = Field(
+        description="Viator destination ID (e.g. 77 for Rome, 732 for Paris).",
+    )
+    count: int = Field(default=10, ge=1, le=25)
+    currency: str = Field(default="USD", max_length=3)
+    keyword: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Optional filter: only products whose title/description matches.",
+    )
+
+
+class ViatorProductImportInput(BaseModel):
+    destination_id: int = Field(
+        description="Viator destination ID to import products from.",
+    )
+    count: int = Field(default=10, ge=1, le=25)
+    currency: str = Field(default="USD", max_length=3)
+
+
+class ViatorGenerateAdsInput(BaseModel):
+    program_ids: list[str] | None = Field(
+        default=None,
+        description="Affiliate program UUIDs to generate ads for. Omit to target all imported Viator programs without ads.",
+    )
+
+
+def _viator_settings(db: Session, business_id):
+    from app.core.config import get_settings
+
+    return get_settings()
+
+
+async def _viator_product_search(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    from app.affiliate.connectors.viator import (
+        ViatorAuthError,
+        ViatorError,
+        ViatorNotConfigured,
+        connector_for_business,
+    )
+
+    assert isinstance(inp, ViatorProductSearchInput)
+    settings = _viator_settings(db, user.business_id)
+    try:
+        connector = connector_for_business(db, user.business_id, settings)
+    except ViatorNotConfigured as exc:
+        return _error(str(exc))
+    try:
+        products = await connector.search_products(
+            inp.destination_id, count=inp.count, currency=inp.currency
+        )
+    except ViatorAuthError as exc:
+        return _error(str(exc))
+    except ViatorError as exc:
+        return _error(f"Viator search failed: {exc}")
+    if inp.keyword:
+        kw = inp.keyword.lower()
+        products = [
+            p
+            for p in products
+            if kw in (p.get("title") or "").lower()
+            or kw in (p.get("description") or "").lower()
+        ]
+    return _ok(
+        {
+            "destination_id": inp.destination_id,
+            "count": len(products),
+            "currency": inp.currency,
+            "products": products,
+            "note": (
+                "Live Viator Partner API results (affiliate productUrl "
+                "included). Prices/availability are as-reported — revalidate "
+                "before quoting to customers."
+            ),
+        }
+    )
+
+
+async def _viator_product_import(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    from app.affiliate import viator_service
+    from app.affiliate.connectors.viator import (
+        ViatorAuthError,
+        ViatorError,
+        ViatorNotConfigured,
+        connector_for_business,
+    )
+
+    assert isinstance(inp, ViatorProductImportInput)
+    settings = _viator_settings(db, user.business_id)
+    try:
+        connector = connector_for_business(db, user.business_id, settings)
+    except ViatorNotConfigured as exc:
+        return _error(str(exc))
+    try:
+        products = await connector.search_products(
+            inp.destination_id, count=inp.count, currency=inp.currency
+        )
+    except ViatorAuthError as exc:
+        return _error(str(exc))
+    except ViatorError as exc:
+        return _error(f"Viator search failed: {exc}")
+    imported = viator_service.import_products(
+        db, user.business_id, products, actor_id=user.id
+    )
+    new = sum(1 for r in imported if r["imported"])
+    return _ok(
+        {
+            "destination_id": inp.destination_id,
+            "products_found": len(products),
+            "programs_new": new,
+            "programs_total": len(imported),
+            "items": imported,
+            "note": (
+                "Imported as affiliate programs (network=viator) with "
+                "trackable /r/{slug} links. Nothing published externally."
+            ),
+        }
+    )
+
+
+async def _viator_generate_ads(
+    db: Session, user: User, inp: BaseModel
+) -> dict[str, Any]:
+    import uuid as _uuid
+
+    from app.affiliate import viator_service
+
+    assert isinstance(inp, ViatorGenerateAdsInput)
+    program_ids = None
+    if inp.program_ids:
+        try:
+            program_ids = [_uuid.UUID(pid) for pid in inp.program_ids]
+        except ValueError:
+            return _error("program_ids must be valid UUIDs")
+    ads = viator_service.generate_ads(
+        db, user.business_id, program_ids, actor_id=user.id
+    )
+    flagged = sum(1 for a in ads if a["compliance_violations"])
+    return _ok(
+        {
+            "ads_created": len(ads),
+            "compliance_flagged": flagged,
+            "ads": ads,
+            "note": (
+                "All ads are DRAFT with FTC disclosure included; "
+                f"{flagged} flagged for human compliance review. "
+                "Nothing published or sent."
+            ),
+        }
+    )
+
+
+_register(
+    ToolDef(
+        id="viator.product_search",
+        description=(
+            "Search Viator tours & experiences by destination ID (live "
+            "Partner API). Returns title, price, rating, affiliate productUrl. "
+            "Answers 'find viator tours in Rome'."
+        ),
+        input_model=ViatorProductSearchInput,
+        risk="low",
+        execute=_viator_product_search,
+    )
+)
+_register(
+    ToolDef(
+        id="viator.product_import",
+        description=(
+            "Import Viator products as affiliate programs with trackable "
+            "/r/{slug} links (idempotent — skips already-imported). "
+            "Answers 'import viator products'."
+        ),
+        input_model=ViatorProductImportInput,
+        risk="low",
+        execute=_viator_product_import,
+    )
+)
+_register(
+    ToolDef(
+        id="viator.generate_ads",
+        description=(
+            "Generate DRAFT ad copy (headline, body, CTA, FTC disclosure) "
+            "for imported Viator products. Ads are never auto-published; "
+            "compliance issues are flagged for review. Answers 'create ads "
+            "for viator products'."
+        ),
+        input_model=ViatorGenerateAdsInput,
+        risk="low",
+        execute=_viator_generate_ads,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # Execution + audit
 # ---------------------------------------------------------------------------
 
@@ -699,6 +1343,77 @@ def _extract_search_query(message: str) -> str | None:
         q = m.group(1).strip()
         q = re.sub(r"^(?:contact|contacts)\s+", "", q, flags=re.IGNORECASE).strip()
         return q or None
+    return None
+
+
+#: Well-known Viator destination IDs for keyword routing. Users can also
+#: pass a numeric destination ID directly ("destination 77").
+_VIATOR_DESTINATIONS: dict[str, int] = {
+    "rome": 77,
+    "paris": 732,
+    "london": 737,
+    "barcelona": 562,
+    "new york": 687,
+    "nyc": 687,
+    "las vegas": 684,
+    "orlando": 685,
+    "los angeles": 686,
+    "miami": 689,
+    "san francisco": 690,
+    "tokyo": 1032,
+    "kyoto": 1033,
+    "bali": 1042,
+    "dubai": 1210,
+    "amsterdam": 525,
+    "athens": 578,
+    "madrid": 572,
+    "lisbon": 573,
+    "florence": 73,
+    "venice": 74,
+    "milan": 75,
+    "naples": 76,
+    "berlin": 545,
+    "prague": 546,
+    "vienna": 547,
+    "budapest": 548,
+    "sydney": 1051,
+    "melbourne": 1052,
+    "cairo": 1205,
+    "marrakech": 1206,
+    "cancun": 700,
+    "honolulu": 696,
+    "hawaii": 696,
+}
+
+
+def _extract_viator_destination(message: str) -> int | None:
+    """Best-effort Viator destination ID: explicit number or known city."""
+    m = re.search(r"destinations?\s*[:#]?\s*(\d{1,6})", message, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    lowered = message.lower()
+    for name, did in _VIATOR_DESTINATIONS.items():
+        if re.search(rf"\b{re.escape(name)}\b", lowered):
+            return did
+    return None
+
+
+def _extract_viator_keyword(message: str) -> str | None:
+    """Best-effort keyword: quoted text, or words after tour/activity nouns."""
+    m = re.search(r"['\"]([^'\"]{2,60})['\"]", message)
+    if m:
+        return m.group(1).strip()
+    m = re.search(
+        r"\b(?:tours?|activities|experiences?)\b\s+(?:for\s+)?([a-zA-Z ]{2,40})",
+        message,
+        re.IGNORECASE,
+    )
+    if m and m.group(1):
+        kw = m.group(1).strip()
+        kw = re.sub(r"^in\s+", "", kw, flags=re.IGNORECASE).strip()
+        # Don't treat a city name as a keyword (it's the destination).
+        if kw and kw.lower() not in _VIATOR_DESTINATIONS:
+            return kw
     return None
 
 
@@ -868,11 +1583,74 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         add("draven.campaigns_status", {})
     if re.search(r"performance|analytics|metrics|stats|statistic|report", msg):
         add("draven.analytics_summary", {})
+    # Travel agency workspace — "new travel lead", "show my travel leads",
+    # "find travel customer …". Placed before the generic contact search so
+    # travel-specific verbs win.
+    if re.search(r"\btravel\b", msg):
+        if re.search(
+            r"\bnew\b.*\bleads?\b|\bleads?\b.*\b(new|create|add)\b|create.*travel.*lead|add.*travel.*lead",
+            msg,
+        ):
+            dest = _extract_name_fragment(message, ["to", "for"])
+            add(
+                "travel.lead_create",
+                {"destination": dest} if dest else {},
+            )
+        elif re.search(r"\bleads?\b", msg) and re.search(
+            r"\blist\b|\bshow\b|\bmy\b|\ball\b|\bstatus\b", msg
+        ):
+            status = None
+            for s in ("new", "qualified", "quoted", "booked", "lost"):
+                if re.search(rf"\b{s}\b", msg):
+                    status = s
+                    break
+            add("travel.lead_status", {"status": status} if status else {})
+        elif re.search(r"\bcustomers?\b", msg) and re.search(
+            r"\bfind\b|\bsearch\b|\blook\b|\bshow\b", msg
+        ):
+            query = _extract_search_query(message)
+            if query:
+                query = re.sub(
+                    r"^travel\s+customers?\s+", "", query, flags=re.IGNORECASE
+                ).strip()
+            add("travel.customer_search", {"query": query} if query else {"query": ""})
+
+    # Viator affiliate intents — "find viator tours in Rome",
+    # "import viator products", "create ads for viator products". Placed
+    # before the generic contact search so viator verbs win.
+    if "viator" in msg:
+        if re.search(r"\bimport\b", msg):
+            dest = _extract_viator_destination(message)
+            add(
+                "viator.product_import",
+                {"destination_id": dest} if dest else {},
+            )
+        elif re.search(r"\bad\b|\bads\b|\bcopy\b|\bpromot", msg):
+            add("viator.generate_ads", {})
+        elif re.search(
+            r"\bfind\b|\bsearch\b|\bshow\b|\blist\b|\btour\b|\bactivit|\bexperience",
+            msg,
+        ):
+            dest = _extract_viator_destination(message)
+            kw = _extract_viator_keyword(message)
+            inp: dict[str, Any] = {}
+            if dest:
+                inp["destination_id"] = dest
+            if kw:
+                inp["keyword"] = kw
+            add("viator.product_search", inp)
+
     # Skip contact search when the message is really a market-research ask
     # ("find 20 products…", "research status") — the market intent owns it —
     # or an explicit contact LISTING ("list my contacts").
     if "market.research_start" not in seen and "market.research_status" not in seen \
             and "draven.contacts_list" not in seen \
+            and "travel.lead_create" not in seen \
+            and "travel.lead_status" not in seen \
+            and "travel.customer_search" not in seen \
+            and "viator.product_search" not in seen \
+            and "viator.product_import" not in seen \
+            and "viator.generate_ads" not in seen \
             and re.search(
         r"\bcontact\b|find|search|look\s+up|who is|who's", msg
     ):
@@ -1148,6 +1926,32 @@ def route_intent(message: str) -> list[tuple[str, dict[str, Any]]]:
         add("draven.business_update", {"name": name} if name else {})
     elif re.search(r"\bmy business\b|\bbusiness profile\b|\bbusiness settings\b", msg):
         add("draven.business_get", {})
+
+    # Compliance — "is this post FTC compliant?", "what does Amazon require?"
+    if re.search(
+        r"\bftc\b|\bcompliant\b|\bcompliance\b|\bdisclosure\b|"
+        r"\baffiliate\b.*\b(require|rule|policy)|"
+        r"\bamazon\b.*\b(require|rule|disclosure)",
+        msg,
+    ):
+        if re.search(r"\bwhat\b.*\brequire|\brequirement|\brules\b", msg) or re.search(
+            r"\bamazon\b.*\b(require|rule|disclosure)", msg
+        ):
+            pack = "amazon_associates" if "amazon" in msg else None
+            add("draven.compliance_rules", {"pack_id": pack} if pack else {})
+        else:
+            quoted = re.search(r"['\"]([^'\"]{10,2000})['\"]", message)
+            add(
+                "draven.compliance_check",
+                {"text": quoted.group(1)} if quoted else {},
+            )
+    # Web research — "search the web for…", "look up…", "research…"
+    if re.search(
+        r"\bsearch the web\b|\blook up\b|\bresearch\b|\bwhat'?s happening\b|\blatest\b.*\bnews\b",
+        msg,
+    ) and "draven.web_research" not in seen:
+        q = _extract_search_query(message)
+        add("draven.web_research", {"question": q} if q else {})
 
     return routed
 

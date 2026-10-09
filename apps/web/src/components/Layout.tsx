@@ -11,6 +11,7 @@ const NAV = [
   { to: "/brain", label: "Brain", icon: "◉" },
   { to: "/campaigns", label: "Campaigns", icon: "✉" },
   { to: "/pipeline", label: "Pipeline", icon: "⫿" },
+  { to: "/travel", label: "Travel", icon: "✈" },
   { to: "/autopilot", label: "Autopilot", icon: "✦" },
   { to: "/calendar", label: "Calendar", icon: "▦" },
   { to: "/meetings", label: "Meetings", icon: "◷" },

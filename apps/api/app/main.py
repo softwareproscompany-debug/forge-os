@@ -32,6 +32,7 @@ from app.routers import (
     partners,
     pipeline,
     templates,
+    travel,
     webhooks,
 )
 from app.routers import settings as settings_router
@@ -90,6 +91,7 @@ def create_app() -> FastAPI:
         market_intel.router,
         settings_router.router,
         compliance.router,
+        travel.router,
     ):
         app.include_router(router, prefix=prefix)
 

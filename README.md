@@ -1,3 +1,13 @@
+![ForgeOS — The AI Marketing Operating System](docs/banner.png)
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/python-3.12-blue.svg" alt="Python 3.12">
+  <img src="https://img.shields.io/badge/node-20-brightgreen.svg" alt="Node 20">
+  <img src="https://img.shields.io/badge/docker-ready-blue.svg" alt="Docker ready">
+  <img src="https://img.shields.io/badge/PRs-welcome-orange.svg" alt="PRs welcome">
+</p>
+
 # ForgeOS
 
 **A business operating system for AI-driven marketing automation.** One tenant =
@@ -9,6 +19,23 @@ with zero external keys, so the whole loop works on a laptop in five minutes.
 > Contract source of truth: [`CONTRACTS.md`](CONTRACTS.md) — repo layout, ports,
 > env vars, data model, API routes, worker jobs, and package interfaces. Read it
 > before changing anything shared.
+
+## Features
+
+- **Brand kits** — voice, tone, colors, and ICP per business; every generation
+  is rendered through them
+- **LLM gateway** (`packages/forge-llm`) — provider abstraction with Claude as
+  the default, prompt registry, content guardrails, per-generation cost logging
+- **Asset library** — versioned drafts with an approval workflow
+  (`draft → in_review → approved`); only approved assets can be sent
+- **Campaign engine** — multi-step sequences across email, SMS, and social, with
+  scheduling, drip timing, and event triggers
+- **Autopilot mode** — weekly content plans generated from business goals, with
+  per-business auto/manual approval gates
+- **Channel abstractions** (`packages/forge-channels`) — SendGrid/SES, Twilio,
+  Meta/LinkedIn/X behind one interface; dev stubs + outbox included
+- **Analytics** — opens, clicks, conversions, per-campaign overview
+- **Multi-tenant** — JWT auth, tenant-isolated data, Alembic-managed Postgres
 
 ## 5-minute quickstart
 
@@ -66,7 +93,8 @@ forge-os/
     k8s/base/             # namespace, configmap, postgres, redis, api, worker,
                           # web, ingress + kustomization
     k8s/overlays/prod/    # replicas, resources, HPAs, PDB, prod image tags, TLS
-  ARCHITECTURE.md  RUNBOOK.md  KEYS.md
+  docs/banner.png
+  ARCHITECTURE.md  RUNBOOK.md  KEYS.md  CONTRIBUTING.md
 ```
 
 ## Configuration
@@ -92,5 +120,23 @@ docker compose config   # validate the compose file (no daemon needed)
 ```
 
 Workstream-local tests live next to their code; `make test` is the aggregate
-gate. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the system design,
-[`RUNBOOK.md`](RUNBOOK.md) for operations, [`KEYS.md`](KEYS.md) for credentials.
+gate.
+
+## Documentation
+
+| Doc | What it covers |
+|---|---|
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | System design, services, data model, event flows |
+| [`CONTRACTS.md`](CONTRACTS.md) | Shared contracts: layout, ports, env vars, API routes, jobs |
+| [`RUNBOOK.md`](RUNBOOK.md) | Operations: deploy, monitor, recover |
+| [`KEYS.md`](KEYS.md) | Every external credential needed to go live |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Dev setup, conventions, adding providers/channels |
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). PRs welcome — please read
+`CONTRACTS.md` before touching shared interfaces.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

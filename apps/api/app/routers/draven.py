@@ -911,7 +911,8 @@ def _deterministic_reply(results: list[dict[str, Any]]) -> str:
             parts.append(
                 f"Campaign '{c.get('name')}' ({c.get('status')})"
                 + (f" with {len(steps)} steps" if steps is not None else "")
-                + (f" — {out.get('note')}" if out.get("note") else ".")
+                + (f" — {out.get('sequence_summary')}" if out.get("sequence_summary") else "")
+                + (f" — {out.get('note')}" if out.get("note") and not out.get("sequence_summary") else ".")
             )
         elif tid == "draven.campaign_steps_add":
             parts.append(
@@ -926,6 +927,18 @@ def _deterministic_reply(results: list[dict[str, Any]]) -> str:
             )
         elif tid == "draven.campaign_enrollments":
             parts.append(f"{out.get('count', 0)} enrollments on this campaign.")
+        elif tid == "draven.campaign_enroll":
+            n = out.get("enrolled", 0)
+            dup = out.get("skipped_already_enrolled", 0)
+            unsub = out.get("skipped_unsubscribed", 0)
+            parts.append(
+                f"Enrolled {n} contact{'s' if n != 1 else ''} into "
+                f"'{out.get('campaign_name')}'"
+                + (f" ({dup} already enrolled skipped" if dup else "")
+                + (f", {unsub} unsubscribed skipped" if unsub else "")
+                + (")" if dup or unsub else "")
+                + "."
+            )
         elif tid == "draven.autopilot_update":
             s = out.get("settings") or {}
             parts.append(

@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  # secrets.yaml is intentionally NOT listed: copy secrets.example.yaml to
+  # secrets.yaml, fill in real values, then add it here (and .gitignore it).
+  - postgres.yaml
+  - redis.yaml
+  - api.yaml
+  - worker.yaml
+  - web.yaml
+  - ingress.yaml
+
+commonLabels:
+  app.kubernetes.io/part-of: forgeos

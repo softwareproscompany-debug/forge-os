@@ -1,0 +1,20 @@
+# Non-secret environment for all ForgeOS services.
+# Secrets (DATABASE_URL, JWT_SECRET, provider keys) live in secrets.yaml
+# (see secrets.example.yaml — never commit real values).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forgeos-config
+  namespace: forgeos
+data:
+  REDIS_URL: "redis://redis:6379/0"
+  JWT_EXPIRE_MINUTES: "1440"
+  LLM_PROVIDER: "stub"
+  ANTHROPIC_MODEL: "claude-sonnet-4-5-20250929"
+  CHANNEL_MODE: "stub"
+  EMAIL_PROVIDER: "smtp"
+  SMTP_PORT: "587"
+  SMTP_FROM: "noreply@example.com"
+  SMS_PROVIDER: "twilio"
+  SEED_DEMO: "false"
+  VITE_API_URL: "http://localhost:8000"

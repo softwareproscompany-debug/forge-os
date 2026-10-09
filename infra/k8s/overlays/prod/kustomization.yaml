@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - api-hpa.yaml
+  - worker-hpa.yaml
+  - pdb.yaml
+
+patches:
+  - path: replicas-resources-patch.yaml
+  - path: ingress-patch.yaml
+
+images:
+  # CI should retag/push these; kustomize rewrites the `forgeos/*:latest`
+  # base images to the prod tags below.
+  - name: forgeos/api
+    newName: forgeos/api
+    newTag: prod
+  - name: forgeos/worker
+    newName: forgeos/worker
+    newTag: prod
+  - name: forgeos/web
+    newName: forgeos/web
+    newTag: prod
+
+commonLabels:
+  app.kubernetes.io/part-of: forgeos
+  environment: prod

@@ -1,0 +1,58 @@
+# Prod overlay: replica bumps + larger resource requests/limits.
+# Applied on top of ../../base via strategic-merge patches.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: forgeos
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: api
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: forgeos
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: worker
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: forgeos
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: web
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

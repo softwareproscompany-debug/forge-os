@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forgeos
+  namespace: forgeos
+  annotations:
+    # Replace with your ingress controller's class as needed.
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+    - host: forgeos.example.com
+      http:
+        paths:
+          # API behind /api/ (matches the /api/v1 contract prefix)
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8000
+          # Everything else is the SPA (nginx serves index.html fallback)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80

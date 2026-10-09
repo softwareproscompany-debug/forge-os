@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: forgeos
+  labels:
+    app: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: forgeos/worker:latest
+          # Must point at the arq WorkerSettings class owned by the worker
+          # workstream; override via ARQ_WORKER_SETTINGS if it differs.
+          command: ["sh", "-c", "arq ${ARQ_WORKER_SETTINGS:-worker.settings.WorkerSettings}"]
+          envFrom:
+            - configMapRef:
+                name: forgeos-config
+            - secretRef:
+                name: forgeos-secrets
+          env:
+            - name: ARQ_WORKER_SETTINGS
+              value: "worker.settings.WorkerSettings"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

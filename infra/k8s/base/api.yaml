@@ -1,0 +1,77 @@
+# Shared env snippet is inlined per-Deployment (Kustomize has no YAML anchors
+# across files). All secrets come from forgeos-secrets; the rest from
+# forgeos-config.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: forgeos
+  labels:
+    app: api
+spec:
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: forgeos
+  labels:
+    app: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      initContainers:
+        # Idempotent schema migration; the entrypoint script also does this in
+        # compose, but in k8s an initContainer keeps rollout ordering explicit.
+        # forge-db layout: alembic/alembic.ini, invoked from the package dir.
+        - name: migrate
+          image: forgeos/api:latest
+          command:
+            ["sh", "-c", "cd /app/packages/forge-db && alembic -c alembic/alembic.ini upgrade head"]
+          envFrom:
+            - configMapRef:
+                name: forgeos-config
+            - secretRef:
+                name: forgeos-secrets
+      containers:
+        - name: api
+          image: forgeos/api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: forgeos-config
+            - secretRef:
+                name: forgeos-secrets
+          # TCP probe: no public /healthz route is defined in CONTRACTS.md,
+          # so we check the port rather than inventing one.
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi

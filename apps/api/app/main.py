@@ -8,23 +8,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.routers import (
     affiliates,
+    alpha,
     analytics,
     assets,
     assistant,
     auth,
     autopilot,
+    billing,
     brand_kits,
     businesses,
     campaigns,
+    compliance,
     contacts,
     draven,
     events,
     interview,
+    knowledge,
+    market_intel,
+    meetings,
     ops,
     outbox,
+    partner_portal,
+    partners,
+    pipeline,
     templates,
     webhooks,
 )
+from app.routers import settings as settings_router
 
 
 def create_app() -> FastAPI:
@@ -55,6 +65,14 @@ def create_app() -> FastAPI:
         businesses.router,
         brand_kits.router,
         contacts.router,
+        pipeline.router,
+        meetings.router,
+        knowledge.router,
+        partners.router,
+        partners.applications_router,
+        partners.tiers_router,
+        partner_portal.router,
+        billing.router,
         templates.router,
         assets.router,
         campaigns.router,
@@ -66,8 +84,12 @@ def create_app() -> FastAPI:
         events.router,
         interview.router,
         affiliates.router,
+        alpha.router,
         assistant.router,
         draven.router,
+        market_intel.router,
+        settings_router.router,
+        compliance.router,
     ):
         app.include_router(router, prefix=prefix)
 

@@ -600,6 +600,56 @@ def seed_beta(cur, mark) -> None:
     else:
         mark(f"beta/content_plan {next_monday}", False)
 
+    # ---- affiliate program + links (Demo Gear Picks) -----------------------
+    aff_program_id = get_id(
+        cur, "affiliate_programs", "business_id = %s AND name = %s",
+        (beta_business_id, "Demo Gear Picks"),
+    )
+    if not aff_program_id:
+        cur.execute(
+            """INSERT INTO affiliate_programs
+               (business_id, name, network, website_url, default_commission_pct,
+                cookie_days, status, notes)
+               VALUES (%s,%s,%s,%s,%s,%s,'active',%s) RETURNING id""",
+            (
+                beta_business_id,
+                "Demo Gear Picks",
+                "amazon",
+                "https://www.amazon.com",
+                "4.000",
+                24,
+                "Demo affiliate program: the offers Beta Bike Works promotes.",
+            ),
+        )
+        aff_program_id = str(cur.fetchone()[0])
+        mark("beta/affiliate_program Demo Gear Picks", True)
+    else:
+        mark("beta/affiliate_program Demo Gear Picks", False)
+
+    aff_links = [
+        ("Trail helmet — spring deal", "trail-helmet",
+         "https://www.amazon.com/dp/B0DEMO1?tag=betabike-20", "spring-deals"),
+        ("Gravel tires 2-pack", "gravel-tires",
+         "https://www.amazon.com/dp/B0DEMO2?tag=betabike-20", "spring-deals"),
+    ]
+    for label, slug, dest_url, utm_campaign in aff_links:
+        aff_link_id = get_id(
+            cur, "affiliate_links", "business_id = %s AND slug = %s",
+            (beta_business_id, slug),
+        )
+        if not aff_link_id:
+            cur.execute(
+                """INSERT INTO affiliate_links
+                   (business_id, program_id, label, slug, destination_url,
+                    utm_source, utm_medium, utm_campaign, is_active)
+                   VALUES (%s,%s,%s,%s,%s,'forgeos','affiliate',%s,TRUE)""",
+                (beta_business_id, aff_program_id, label, slug, dest_url,
+                 utm_campaign),
+            )
+            mark(f"beta/affiliate_link {slug}", True)
+        else:
+            mark(f"beta/affiliate_link {slug}", False)
+
 
 def main() -> None:
     verify_selftest()

@@ -22,6 +22,7 @@ from forge_db.models import (
     Campaign,
     CampaignEnrollment,
     CampaignStatus,
+    CampaignStep,
     DevOutbox,
     EnrollmentStatus,
     Event,
@@ -201,4 +202,232 @@ def ops_activity(
         stages=_stage_counts(db, user, day_ago),
         counters=counters,
         activity=_activity_feed(db, user, limit),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Brain (Card 5 knowledge-graph views)
+#
+# One JSON document feeds every brain view (rings, links, timeline, areas):
+# five layers — brand kits -> assets -> campaigns -> sends -> events — plus
+# the links between them and a 30-day timeline. Read-only, tenant-scoped,
+# node lists capped so the payload stays small on large accounts.
+# ---------------------------------------------------------------------------
+
+_BRAIN_NODES_PER_LAYER = 60
+_BRAIN_LINK_CAP = 300
+_BRAIN_TIMELINE_CAP = 240
+_BRAIN_TIMELINE_DAYS = 30
+
+
+def _enum_value(v) -> str:
+    return v.value if hasattr(v, "value") else str(v)
+
+
+@router.get("/brain", response_model=schemas.BrainResponse)
+def ops_brain(user: CurrentUser, db: DbSession):
+    """Read-only knowledge graph for the /brain views."""
+    now = _utcnow()
+    cutoff = now - timedelta(days=_BRAIN_TIMELINE_DAYS)
+
+    links: list[schemas.BrainLink] = []
+    layers: list[schemas.BrainLayer] = []
+
+    # -- foundation: brand kits -------------------------------------------
+    kits = scoped(db, BrandKit, user).order_by(BrandKit.created_at).all()
+    kit_nodes = [
+        schemas.BrainNode(
+            id=f"bk-{k.id}",
+            label=k.name,
+            detail=(k.voice_description or "")[:90] or None,
+        )
+        for k in kits[:_BRAIN_NODES_PER_LAYER]
+    ]
+    layers.append(
+        schemas.BrainLayer(
+            key="foundation", label="Foundation", count=len(kits), nodes=kit_nodes
+        )
+    )
+    first_kit = f"bk-{kits[0].id}" if kits else None
+
+    # -- origination: assets ----------------------------------------------
+    asset_total = scoped(db, Asset, user).count()
+    assets = (
+        scoped(db, Asset, user)
+        .order_by(Asset.created_at.desc())
+        .limit(_BRAIN_NODES_PER_LAYER)
+        .all()
+    )
+    asset_ids = {a.id for a in assets}
+    layers.append(
+        schemas.BrainLayer(
+            key="origination",
+            label="Origination",
+            count=asset_total,
+            nodes=[
+                schemas.BrainNode(
+                    id=f"as-{a.id}",
+                    label=a.title or "untitled",
+                    detail=f"{_enum_value(a.kind)} · {_enum_value(a.status)}",
+                    at=a.created_at,
+                )
+                for a in assets
+            ],
+        )
+    )
+    if first_kit:
+        for a in assets:
+            links.append(
+                schemas.BrainLink(source=first_kit, target=f"as-{a.id}", kind="brand")
+            )
+
+    # -- growth: campaigns --------------------------------------------------
+    campaign_total = scoped(db, Campaign, user).count()
+    campaigns = (
+        scoped(db, Campaign, user)
+        .order_by(Campaign.created_at.desc())
+        .limit(_BRAIN_NODES_PER_LAYER)
+        .all()
+    )
+    campaign_ids = {c.id for c in campaigns}
+    layers.append(
+        schemas.BrainLayer(
+            key="growth",
+            label="Growth",
+            count=campaign_total,
+            nodes=[
+                schemas.BrainNode(
+                    id=f"ca-{c.id}",
+                    label=c.name,
+                    detail=_enum_value(c.status),
+                    at=c.created_at,
+                )
+                for c in campaigns
+            ],
+        )
+    )
+    if campaign_ids and asset_ids:
+        step_rows = (
+            db.query(CampaignStep)
+            .filter(
+                CampaignStep.campaign_id.in_(campaign_ids),
+                CampaignStep.asset_id.in_(asset_ids),
+            )
+            .all()
+        )
+        for step in step_rows:
+            links.append(
+                schemas.BrainLink(
+                    source=f"as-{step.asset_id}",
+                    target=f"ca-{step.campaign_id}",
+                    kind="asset",
+                )
+            )
+
+    # -- reach: sends ---------------------------------------------------------
+    send_total = scoped(db, Send, user).count()
+    sends = (
+        scoped(db, Send, user)
+        .order_by(Send.created_at.desc())
+        .limit(_BRAIN_NODES_PER_LAYER)
+        .all()
+    )
+    send_ids = {str(s.id) for s in sends}
+    layers.append(
+        schemas.BrainLayer(
+            key="reach",
+            label="Reach",
+            count=send_total,
+            nodes=[
+                schemas.BrainNode(
+                    id=f"se-{s.id}",
+                    label=f"{_enum_value(s.channel)} → {s.to_address}",
+                    detail=(s.subject or "").strip() or None,
+                    at=s.sent_at or s.created_at,
+                )
+                for s in sends
+            ],
+        )
+    )
+    for s in sends:
+        if s.campaign_id in campaign_ids:
+            links.append(
+                schemas.BrainLink(
+                    source=f"ca-{s.campaign_id}", target=f"se-{s.id}", kind="campaign"
+                )
+            )
+
+    # -- evidence: events -----------------------------------------------------
+    event_total = scoped(db, Event, user).count()
+    events = (
+        scoped(db, Event, user)
+        .order_by(Event.created_at.desc())
+        .limit(_BRAIN_NODES_PER_LAYER)
+        .all()
+    )
+    layers.append(
+        schemas.BrainLayer(
+            key="evidence",
+            label="Evidence",
+            count=event_total,
+            nodes=[
+                schemas.BrainNode(
+                    id=f"ev-{e.id}", label=e.kind, detail=None, at=e.created_at
+                )
+                for e in events
+            ],
+        )
+    )
+    for e in events:
+        payload = e.payload or {}
+        send_ref = payload.get("send_id")
+        if send_ref and str(send_ref) in send_ids:
+            links.append(
+                schemas.BrainLink(
+                    source=f"se-{send_ref}", target=f"ev-{e.id}", kind="engagement"
+                )
+            )
+
+    # -- timeline: sends + events over the last 30 days ------------------------
+    timeline: list[schemas.BrainTimelinePoint] = []
+    recent_sends = (
+        scoped(db, Send, user)
+        .filter(Send.created_at >= cutoff)
+        .order_by(Send.created_at.asc())
+        .limit(_BRAIN_TIMELINE_CAP)
+        .all()
+    )
+    for s in recent_sends:
+        timeline.append(
+            schemas.BrainTimelinePoint(
+                at=s.sent_at or s.created_at,
+                kind="sent",
+                label=f"{_enum_value(s.channel)} → {s.to_address}",
+            )
+        )
+    _event_kind_map = {
+        "email_opened": "opened",
+        "email_clicked": "clicked",
+        "converted": "converted",
+    }
+    recent_events = (
+        scoped(db, Event, user)
+        .filter(Event.created_at >= cutoff)
+        .order_by(Event.created_at.asc())
+        .limit(_BRAIN_TIMELINE_CAP)
+        .all()
+    )
+    for e in recent_events:
+        kind = _event_kind_map.get(e.kind, "event")
+        timeline.append(
+            schemas.BrainTimelinePoint(at=e.created_at, kind=kind, label=e.kind)
+        )
+    timeline.sort(key=lambda p: p.at)
+    timeline = timeline[-_BRAIN_TIMELINE_CAP:]
+
+    return schemas.BrainResponse(
+        as_of=now,
+        layers=layers,
+        links=links[:_BRAIN_LINK_CAP],
+        timeline=timeline,
     )

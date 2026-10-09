@@ -49,7 +49,7 @@ export default function AutopilotPage() {
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [planDay, setPlanDay] = useState(0);
   const [planHour, setPlanHour] = useState(6);
-  const [planCadence, setPlanCadence] = useState<"weekly" | "biweekly">(
+  const [planCadence, setPlanCadence] = useState<"daily" | "weekly" | "biweekly">(
     "weekly",
   );
   const [saving, setSaving] = useState(false);
@@ -158,7 +158,9 @@ export default function AutopilotPage() {
   if (loading) return <Spinner label="Loading autopilot plan…" />;
 
   const scheduleSummary = settings
-    ? `Drafts ${settings.plan_cadence} on ${dayName(settings.plan_day)} at ${hourLabel(settings.plan_hour)} business time.`
+    ? settings.plan_cadence === "daily"
+      ? `Drafts daily at ${hourLabel(settings.plan_hour)} business time.`
+      : `Drafts ${settings.plan_cadence} on ${dayName(settings.plan_day)} at ${hourLabel(settings.plan_hour)} business time.`
     : "Drafts weekly on Monday at 06:00 business time.";
 
   return (
@@ -250,14 +252,25 @@ export default function AutopilotPage() {
                 gap: 12,
               }}
             >
-              <Field label="Draft day">
+              <Field
+                label="Draft day"
+                hint={
+                  planCadence === "daily"
+                    ? "Not used on the daily cadence — drafts run every day."
+                    : undefined
+                }
+              >
                 <select
                   className="input"
                   value={planDay}
+                  disabled={planCadence === "daily"}
                   onChange={(e) => {
                     setPlanDay(Number(e.target.value));
                     setSaved(false);
                   }}
+                  style={
+                    planCadence === "daily" ? { opacity: 0.45 } : undefined
+                  }
                 >
                   {DAY_NAMES.map((name, i) => (
                     <option key={name} value={i}>
@@ -284,16 +297,23 @@ export default function AutopilotPage() {
               </Field>
               <Field
                 label="Cadence"
-                hint="Biweekly drafts at most once every ~13 days."
+                hint={
+                  planCadence === "daily"
+                    ? "Drafts a fresh plan every day at the draft time."
+                    : "Biweekly drafts at most once every ~13 days."
+                }
               >
                 <select
                   className="input"
                   value={planCadence}
                   onChange={(e) => {
-                    setPlanCadence(e.target.value as "weekly" | "biweekly");
+                    setPlanCadence(
+                      e.target.value as "daily" | "weekly" | "biweekly"
+                    );
                     setSaved(false);
                   }}
                 >
+                  <option value="daily">Daily</option>
                   <option value="weekly">Weekly</option>
                   <option value="biweekly">Biweekly</option>
                 </select>

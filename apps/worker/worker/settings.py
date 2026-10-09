@@ -6,7 +6,7 @@ the ``worker`` package is importable). The dotted path is overridable via
 
 * ``redis_settings`` — built from ``REDIS_URL`` (``redis://localhost:6379/0``
   fallback for local dev).
-* ``functions`` — the six jobs in :mod:`worker.jobs`.
+* ``functions`` — the seven jobs in :mod:`worker.jobs`.
 * ``cron_jobs`` — :func:`campaign_tick` every 60 seconds, plus
   :func:`autopilot_plan` hourly on the hour. The autopilot cron is hourly
   (not daily) on purpose: each business has its own timezone, and the job
@@ -29,6 +29,7 @@ from sqlalchemy import text
 from forge_db.session import SessionLocal
 from worker.jobs import (
     autopilot_plan,
+    autopilot_plan_now,
     campaign_tick,
     generate_asset,
     handle_event,
@@ -89,12 +90,17 @@ class WorkerSettings:
         campaign_tick,
         handle_event,
         autopilot_plan,
+        autopilot_plan_now,
         weekly_summary,
     ]
-    # campaign_tick: every 60s at :00. autopilot_plan: every hour at :00 — it
-    # drafts each business's weekly plan only at that business's local
-    # Monday 06:00 (the job itself is a no-op outside that window), so an
-    # hourly wake is the cheapest way to cover every timezone.
+    # campaign_tick: every 60s at :00. autopilot_plan: every 15 minutes — it
+    # evaluates each business's configured plan schedule
+    # (autopilot_settings.plan_day/plan_hour/plan_cadence, default local
+    # Monday 06:00 weekly) and drafts whatever is due. The 15-minute engine
+    # tick covers every timezone and every per-tenant schedule; the job
+    # itself decides per business whether this tick is its moment.
+    # autopilot_plan_now is *not* a cron: it is the manual "run now" trigger
+    # enqueued by POST /api/v1/autopilot/plan/run-now.
     # weekly_summary: every hour at :00 — it cuts each business's weekly
     # evidence summary only at that business's local Sunday 23:00. A single
     # daily cron cannot honor per-business timezones, hence the hourly wake
@@ -102,7 +108,7 @@ class WorkerSettings:
     # arq treats an omitted minute as a wildcard (every minute).
     cron_jobs = [
         cron(campaign_tick, minute={*range(60)}),
-        cron(autopilot_plan, hour={*range(24)}, minute={0}),
+        cron(autopilot_plan, hour={*range(24)}, minute={0, 15, 30, 45}),
         cron(weekly_summary, hour={*range(24)}, minute={0}),
     ]
     redis_settings = _redis_settings()

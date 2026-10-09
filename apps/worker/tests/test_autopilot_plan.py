@@ -5,14 +5,19 @@
 * The email item reuses the summary's top asset when it is an email_copy
   asset, else the newest approved email_copy asset, else null.
 * A second run for the same (business, week) is a no-op (idempotent skip).
-* Timezone gating: the job drafts only during local Monday 06:xx per
-  business (stdlib zoneinfo, UTC fallback).
+* Timezone gating: the job drafts only during the business's configured
+  plan window (default local Monday 06:xx; stdlib zoneinfo, UTC fallback).
+* Per-tenant schedule: custom plan_day/plan_hour are honored; the biweekly
+  cadence drafts at most once per ~13 days (via last_planned_at).
+* ``autopilot_plan_now`` drafts immediately, ignoring the schedule, and is
+  idempotent per week.
 
 Everything runs against fresh SQLite files; ``LLM_PROVIDER=stub``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -28,6 +33,7 @@ from forge_db.models import (  # noqa: E402
     Asset,
     AssetKind,
     AssetStatus,
+    AutopilotSettings,
     Base,
     BrandKit,
     Business,
@@ -36,7 +42,7 @@ from forge_db.models import (  # noqa: E402
     WeeklySummary,
 )
 from worker import jobs  # noqa: E402
-from worker.jobs import autopilot_plan  # noqa: E402
+from worker.jobs import autopilot_plan, autopilot_plan_now  # noqa: E402
 
 UTC = timezone.utc
 FAKE_CTX = {"job_try": 1}
@@ -315,7 +321,7 @@ class TestTimezoneGating:
             db_url, datetime(2026, 10, 12, 12, 0, tzinfo=UTC), monkeypatch
         )
         assert result["drafted"] == 0
-        assert result["skipped_not_monday"] == 1
+        assert result["skipped_not_due"] == 1
         assert _plan(db_url, business.id) is None
 
     def test_sunday_06_00_local_is_not_a_plan_moment(
@@ -329,7 +335,7 @@ class TestTimezoneGating:
             db_url, datetime(2026, 10, 11, 11, 0, tzinfo=UTC), monkeypatch
         )
         assert result["drafted"] == 0
-        assert result["skipped_not_monday"] == 1
+        assert result["skipped_not_due"] == 1
 
     def test_unknown_timezone_falls_back_to_utc(self, db, db_url, monkeypatch):
         business = _business(db, timezone="Not/AZone")
@@ -338,3 +344,237 @@ class TestTimezoneGating:
         result = _run_job(db_url, _monday_6am_utc(), monkeypatch)
         assert result["drafted"] == 1
         assert _plan(db_url, business.id) is not None
+
+
+# ---------------------------------------------------------------------------
+# per-tenant schedule
+# ---------------------------------------------------------------------------
+
+
+def _settings(db: Session, business: Business, **kw) -> AutopilotSettings:
+    s = AutopilotSettings(
+        business_id=business.id,
+        plan_day=kw.get("plan_day", 0),
+        plan_hour=kw.get("plan_hour", 6),
+        plan_cadence=kw.get("plan_cadence", "weekly"),
+        last_planned_at=kw.get("last_planned_at"),
+    )
+    db.add(s)
+    db.flush()
+    return s
+
+
+def _settings_row(db_url, business_id) -> AutopilotSettings | None:
+    session = _fresh_session(db_url)
+    try:
+        return session.get(AutopilotSettings, business_id)
+    finally:
+        session.close()
+
+
+class TestPerTenantSchedule:
+    def test_custom_day_and_hour_are_honored(self, db, db_url, monkeypatch):
+        """plan_day=Wednesday, plan_hour=14 (UTC): the default Monday
+        06:00 moment must NOT draft; Wednesday 14:00 must."""
+        business = _business(db)
+        _settings(db, business, plan_day=2, plan_hour=14)
+        db.commit()
+
+        result = _run_job(db_url, _monday_6am_utc(), monkeypatch)
+        assert result["drafted"] == 0
+        assert result["skipped_not_due"] == 1
+        assert _plan(db_url, business.id) is None
+
+        # 2026-10-14 is a Wednesday.
+        result = _run_job(
+            db_url, datetime(2026, 10, 14, 14, 0, tzinfo=UTC), monkeypatch
+        )
+        assert result["drafted"] == 1
+        plan = _plan(db_url, business.id)
+        assert plan is not None
+        # week_start stays the Monday of the draft week, whatever the day.
+        assert plan.week_start == MONDAY
+        # The draft stamps last_planned_at for the biweekly gate.
+        assert _settings_row(db_url, business.id).last_planned_at is not None
+
+    def test_custom_hour_wrong_hour_skips(self, db, db_url, monkeypatch):
+        business = _business(db)
+        _settings(db, business, plan_day=0, plan_hour=9)
+        db.commit()
+
+        result = _run_job(db_url, _monday_6am_utc(), monkeypatch)
+        assert result["drafted"] == 0
+        assert result["skipped_not_due"] == 1
+
+    def test_biweekly_skips_within_gap(self, db, db_url, monkeypatch):
+        """A draft 7 days ago blocks this week's draft on biweekly."""
+        business = _business(db)
+        _settings(
+            db,
+            business,
+            plan_cadence="biweekly",
+            last_planned_at=datetime(2026, 10, 12, 6, 5, tzinfo=UTC),
+        )
+        db.commit()
+
+        result = _run_job(
+            db_url, datetime(2026, 10, 19, 6, 0, tzinfo=UTC), monkeypatch
+        )
+        assert result["drafted"] == 0
+        assert result["skipped_cadence"] == 1
+        assert _plan(db_url, business.id) is None
+
+    def test_biweekly_drafts_after_gap(self, db, db_url, monkeypatch):
+        """A draft 14 days ago allows this week's draft on biweekly."""
+        business = _business(db)
+        _settings(
+            db,
+            business,
+            plan_cadence="biweekly",
+            last_planned_at=datetime(2026, 10, 5, 6, 0, tzinfo=UTC),
+        )
+        db.commit()
+
+        result = _run_job(
+            db_url, datetime(2026, 10, 19, 6, 0, tzinfo=UTC), monkeypatch
+        )
+        assert result["drafted"] == 1
+        plan = _plan(db_url, business.id)
+        assert plan is not None
+        assert plan.week_start == date(2026, 10, 19)
+
+    def test_weekly_ignores_last_planned_at(self, db, db_url, monkeypatch):
+        """The weekly cadence drafts every plan moment regardless of the
+        last draft stamp."""
+        business = _business(db)
+        _settings(
+            db,
+            business,
+            plan_cadence="weekly",
+            last_planned_at=datetime(2026, 10, 12, 6, 5, tzinfo=UTC),
+        )
+        db.commit()
+
+        result = _run_job(db_url, _monday_6am_utc(), monkeypatch)
+        assert result["drafted"] == 1
+
+    def test_biweekly_first_draft_has_no_stamp(self, db, db_url, monkeypatch):
+        """A biweekly business that never drafted is due at its first
+        plan moment."""
+        business = _business(db)
+        _settings(db, business, plan_cadence="biweekly")
+        db.commit()
+
+        result = _run_job(db_url, _monday_6am_utc(), monkeypatch)
+        assert result["drafted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# autopilot_plan_now (manual trigger)
+# ---------------------------------------------------------------------------
+
+
+def _run_now(db_url, business_id, when: datetime, monkeypatch, created_by=None):
+    monkeypatch.setattr(jobs, "utcnow", lambda: when)
+    return asyncio.run(autopilot_plan_now(FAKE_CTX, str(business_id), created_by))
+
+
+class TestRunNow:
+    def test_run_now_drafts_outside_schedule(self, db, db_url, monkeypatch):
+        """Friday 2026-10-16 15:30 UTC is no plan moment — the manual
+        trigger drafts anyway."""
+        business = _business(db)
+        db.commit()
+
+        result = _run_now(
+            db_url, business.id, datetime(2026, 10, 16, 15, 30, tzinfo=UTC),
+            monkeypatch,
+        )
+        assert result["ok"] is True
+        assert result["created"] is True
+
+        plan = _plan(db_url, business.id)
+        assert plan is not None
+        assert plan.week_start == MONDAY  # Monday of the draft week
+        assert plan.status == PlanStatus.draft
+        assert plan.created_by is None
+        assert len(plan.items) == 3
+
+    def test_run_now_records_creator_and_stamps_settings(
+        self, db, db_url, monkeypatch
+    ):
+        business = _business(db)
+        _settings(db, business, plan_cadence="biweekly")
+        db.commit()
+        creator = uuid.uuid4()
+
+        result = _run_now(
+            db_url,
+            business.id,
+            datetime(2026, 10, 16, 15, 30, tzinfo=UTC),
+            monkeypatch,
+            created_by=str(creator),
+        )
+        assert result["created"] is True
+
+        session = _fresh_session(db_url)
+        try:
+            plan = (
+                session.query(ContentPlan)
+                .filter(ContentPlan.business_id == business.id)
+                .one()
+            )
+            assert plan.created_by == creator
+            settings = session.get(AutopilotSettings, business.id)
+            assert settings.last_planned_at is not None
+        finally:
+            session.close()
+
+    def test_run_now_is_idempotent_same_week(self, db, db_url, monkeypatch):
+        business = _business(db)
+        db.commit()
+        when = datetime(2026, 10, 16, 15, 30, tzinfo=UTC)
+
+        first = _run_now(db_url, business.id, when, monkeypatch)
+        assert first["created"] is True
+        second = _run_now(db_url, business.id, when, monkeypatch)
+        assert second["created"] is False
+        assert second["plan_id"] == first["plan_id"]
+
+        session = _fresh_session(db_url)
+        try:
+            count = (
+                session.query(ContentPlan)
+                .filter(ContentPlan.business_id == business.id)
+                .count()
+            )
+        finally:
+            session.close()
+        assert count == 1
+
+    def test_run_now_unknown_business(self, db_url, monkeypatch):
+        result = _run_now(
+            db_url,
+            uuid.uuid4(),
+            datetime(2026, 10, 16, 15, 30, tzinfo=UTC),
+            monkeypatch,
+        )
+        assert result["ok"] is False
+        assert "not found" in result["error"]
+
+    def test_run_now_counts_toward_biweekly_gap(self, db, db_url, monkeypatch):
+        """A manual draft stamps last_planned_at, so the next cron plan
+        moment inside the gap is skipped on the biweekly cadence."""
+        business = _business(db)
+        _settings(db, business, plan_cadence="biweekly")
+        db.commit()
+
+        _run_now(
+            db_url, business.id, datetime(2026, 10, 16, 15, 30, tzinfo=UTC),
+            monkeypatch,
+        )
+        result = _run_job(
+            db_url, datetime(2026, 10, 19, 6, 0, tzinfo=UTC), monkeypatch
+        )
+        assert result["drafted"] == 0
+        assert result["skipped_cadence"] == 1

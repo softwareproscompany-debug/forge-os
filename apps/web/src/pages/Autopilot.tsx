@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { autopilotApi } from "../lib/api";
-import type { ContentPlan } from "../lib/api";
+import type { AutopilotSettings, ContentPlan } from "../lib/api";
 import {
   Badge,
   DataStamp,
   EmptyState,
   ErrorBanner,
+  Field,
   PageHeader,
   Spinner,
   errorMessage,
@@ -26,6 +27,12 @@ function dayName(day: number): string {
   return DAY_NAMES[day] ?? `Day ${day}`;
 }
 
+function hourLabel(hour: number): string {
+  const suffix = hour < 12 ? "AM" : "PM";
+  const h = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h}:00 ${suffix}`;
+}
+
 export default function AutopilotPage() {
   const navigate = useNavigate();
   const [plan, setPlan] = useState<ContentPlan | null>(null);
@@ -36,6 +43,23 @@ export default function AutopilotPage() {
   const [approvedCampaignId, setApprovedCampaignId] = useState<string | null>(
     null,
   );
+
+  // Planner schedule (per business).
+  const [settings, setSettings] = useState<AutopilotSettings | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+  const [planDay, setPlanDay] = useState(0);
+  const [planHour, setPlanHour] = useState(6);
+  const [planCadence, setPlanCadence] = useState<"weekly" | "biweekly">(
+    "weekly",
+  );
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Manual run-now trigger.
+  const [running, setRunning] = useState(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [runNotice, setRunNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -50,9 +74,52 @@ export default function AutopilotPage() {
     }
   }, []);
 
+  const loadSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSaveError(null);
+    try {
+      const s = await autopilotApi.get();
+      setSettings(s);
+      setPlanDay(s.plan_day);
+      setPlanHour(s.plan_hour);
+      setPlanCadence(s.plan_cadence);
+    } catch {
+      // Schedule editing is secondary; the plan view still works.
+      setSettings(null);
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadSettings();
+  }, [load, loadSettings]);
+
+  const scheduleDirty =
+    settings !== null &&
+    (planDay !== settings.plan_day ||
+      planHour !== settings.plan_hour ||
+      planCadence !== settings.plan_cadence);
+
+  const onSaveSchedule = async () => {
+    setSaveError(null);
+    setSaved(false);
+    setSaving(true);
+    try {
+      const s = await autopilotApi.update({
+        plan_day: planDay,
+        plan_hour: planHour,
+        plan_cadence: planCadence,
+      });
+      setSettings(s);
+      setSaved(true);
+    } catch (err) {
+      setSaveError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const onApprove = async () => {
     if (!plan) return;
@@ -69,35 +136,83 @@ export default function AutopilotPage() {
     }
   };
 
+  const onRunNow = async () => {
+    setRunError(null);
+    setRunNotice(null);
+    setRunning(true);
+    try {
+      const out = await autopilotApi.runNow();
+      setPlan(out.plan);
+      setRunNotice(
+        out.created
+          ? "A fresh plan was drafted for this week."
+          : "This week's plan already exists — showing it below.",
+      );
+    } catch (err) {
+      setRunError(errorMessage(err));
+    } finally {
+      setRunning(false);
+    }
+  };
+
   if (loading) return <Spinner label="Loading autopilot plan…" />;
+
+  const scheduleSummary = settings
+    ? `Drafts ${settings.plan_cadence} on ${dayName(settings.plan_day)} at ${hourLabel(settings.plan_hour)} business time.`
+    : "Drafts weekly on Monday at 06:00 business time.";
 
   return (
     <div>
       <PageHeader
         title="Autopilot"
-        subtitle="The weekly planner drafts next week's content every Monday at 06:00 business time. You approve the plan; the week runs itself."
+        subtitle={`The planner drafts this week's content on your schedule — ${scheduleSummary} You approve the plan; the week runs itself.`}
         actions={
-          plan?.status === "draft" && (
+          <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
-              className="btn btn-primary"
-              onClick={onApprove}
-              disabled={approving}
+              className="btn"
+              onClick={onRunNow}
+              disabled={running}
+              title="Draft this week's plan right now (owner/admin)"
             >
-              {approving ? "Approving…" : "Approve plan"}
+              {running ? "Drafting…" : "Run now"}
             </button>
-          )
+            {plan?.status === "draft" && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={onApprove}
+                disabled={approving}
+              >
+                {approving ? "Approving…" : "Approve plan"}
+              </button>
+            )}
+          </div>
         }
       />
 
       <ErrorBanner error={error} onRetry={load} />
+
+      {(runError || runNotice) && (
+        <div
+          className={`alert ${runError ? "alert-error" : "alert-info"}`}
+          role={runError ? "alert" : "status"}
+          style={{ marginBottom: 16 }}
+        >
+          <div>
+            <strong>{runError ? "Run now failed." : "Plan ready."}</strong>
+            <div className="alert-detail">{runError ?? runNotice}</div>
+          </div>
+        </div>
+      )}
 
       {approvedCampaignId && (
         <div className="alert alert-info" role="status">
           <div>
             <strong>Plan approved.</strong>
             <div className="alert-detail">
-              A scheduled autopilot campaign was created for the week.
+              A running autopilot campaign was created for the week — sends go
+              out on the plan's days, no manual launch needed.
             </div>
           </div>
           <Link
@@ -109,15 +224,124 @@ export default function AutopilotPage() {
         </div>
       )}
 
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-head">
+          <div>
+            <div className="card-title">Planner schedule</div>
+            <div className="muted">
+              When the worker drafts your weekly content plan (business-local
+              time). Changes apply from the next draft onward.
+            </div>
+          </div>
+        </div>
+        {settingsLoading ? (
+          <Spinner label="Loading schedule…" />
+        ) : settings === null ? (
+          <div className="muted">
+            Schedule settings are unavailable right now — the plan view above
+            still works.
+          </div>
+        ) : (
+          <div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                gap: 12,
+              }}
+            >
+              <Field label="Draft day">
+                <select
+                  className="input"
+                  value={planDay}
+                  onChange={(e) => {
+                    setPlanDay(Number(e.target.value));
+                    setSaved(false);
+                  }}
+                >
+                  {DAY_NAMES.map((name, i) => (
+                    <option key={name} value={i}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Draft time">
+                <select
+                  className="input"
+                  value={planHour}
+                  onChange={(e) => {
+                    setPlanHour(Number(e.target.value));
+                    setSaved(false);
+                  }}
+                >
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <option key={h} value={h}>
+                      {hourLabel(h)}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <Field
+                label="Cadence"
+                hint="Biweekly drafts at most once every ~13 days."
+              >
+                <select
+                  className="input"
+                  value={planCadence}
+                  onChange={(e) => {
+                    setPlanCadence(e.target.value as "weekly" | "biweekly");
+                    setSaved(false);
+                  }}
+                >
+                  <option value="weekly">Weekly</option>
+                  <option value="biweekly">Biweekly</option>
+                </select>
+              </Field>
+            </div>
+            <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={onSaveSchedule}
+                disabled={saving || !scheduleDirty}
+              >
+                {saving ? "Saving…" : "Save schedule"}
+              </button>
+              {saved && !scheduleDirty && (
+                <span className="muted" role="status">
+                  Schedule saved.
+                </span>
+              )}
+              {saveError && (
+                <span className="alert-detail" role="alert">
+                  {saveError}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
       {plan === null && (
         <div className="card">
           <EmptyState
             title="No draft plan yet"
-            hint="The planner runs Monday 06:00 business time."
+            hint="The planner drafts on your schedule above — or draft one right now."
             action={
-              <button type="button" className="btn" onClick={load}>
-                Check again
-              </button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={onRunNow}
+                  disabled={running}
+                >
+                  {running ? "Drafting…" : "Run now"}
+                </button>
+                <button type="button" className="btn" onClick={load}>
+                  Check again
+                </button>
+              </div>
             }
           />
         </div>
@@ -132,7 +356,7 @@ export default function AutopilotPage() {
                 <DataStamp at={plan.created_at} />
               </div>
               <div className="muted">
-                This plan was approved and turned into a scheduled campaign.
+                This plan was approved and turned into a running campaign.
               </div>
             </div>
             {plan.campaign_id && (
@@ -153,8 +377,8 @@ export default function AutopilotPage() {
             Week of {plan.week_start} <Badge value={plan.status} />
           </div>
           <div className="muted">
-            This plan was rejected. The planner will draft a fresh plan next
-            Monday at 06:00 business time.
+            This plan was rejected. The planner will draft a fresh plan on
+            your next scheduled draft day.
           </div>
         </div>
       )}
@@ -168,7 +392,7 @@ export default function AutopilotPage() {
                 <DataStamp at={plan.created_at} />
               </div>
               <div className="muted">
-                Review the draft below. Approving creates a scheduled campaign
+                Review the draft below. Approving creates a running campaign
                 with one step per item, sent on the item's day.
               </div>
             </div>

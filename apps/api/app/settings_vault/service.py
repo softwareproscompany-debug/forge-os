@@ -67,6 +67,10 @@ KNOWN_SECRETS: tuple[SecretSpec, ...] = (
                "Pay-as-you-go market data (dataforseo.com)."),
     SecretSpec("dataforseo.password", "market_intel", "DataForSEO password",
                "password", "API password for the DataForSEO account."),
+    SecretSpec("stripe.webhook_secret", "webhooks", "Stripe webhook secret",
+               "hmac_secret",
+               "Signing secret for Stripe webhooks (Stripe Dashboard → "
+               "Developers → Webhooks). Starts with whsec_."),
 )
 
 _KNOWN_BY_KEY: dict[str, SecretSpec] = {s.key: s for s in KNOWN_SECRETS}

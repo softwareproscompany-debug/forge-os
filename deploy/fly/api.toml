@@ -1,7 +1,7 @@
 # ForgeOS API on Fly.io — FastAPI + Alembic migrations via release command.
 # Deploy from the repo root:
 #   fly deploy --config deploy/fly/api.toml --dockerfile apps/api/Dockerfile .
-app = "forgeos-api"
+app = "forgeos-api-app"
 primary_region = "dfw"
 
 [build]

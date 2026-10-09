@@ -46,6 +46,8 @@ SECTIONS: list[dict[str, str]] = [
      "blurb": "Live market data connectors."},
     {"id": "webhooks", "label": "Webhooks", "icon": "⚡",
      "blurb": "HMAC signing secrets for inbound lead webhooks."},
+    {"id": "affiliates", "label": "Affiliates", "icon": "◆",
+     "blurb": "Affiliate network API keys for product imports."},
 ]
 
 KNOWN_SECRETS: tuple[SecretSpec, ...] = (
@@ -71,6 +73,10 @@ KNOWN_SECRETS: tuple[SecretSpec, ...] = (
                "hmac_secret",
                "Signing secret for Stripe webhooks (Stripe Dashboard → "
                "Developers → Webhooks). Starts with whsec_."),
+    SecretSpec("viator.affiliate_api_key", "affiliates", "Viator affiliate API key",
+               "api_key",
+               "Viator partner API key (exp-api-key header) for product "
+               "search and import. Paste from your Viator partner account."),
 )
 
 _KNOWN_BY_KEY: dict[str, SecretSpec] = {s.key: s for s in KNOWN_SECRETS}

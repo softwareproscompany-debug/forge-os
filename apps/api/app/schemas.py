@@ -7,7 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 T = TypeVar("T")
 
@@ -364,6 +364,10 @@ class AutopilotOut(ORMModel):
     daily_send_cap: int
     quiet_hours_start: int
     quiet_hours_end: int
+    plan_day: int
+    plan_hour: int
+    plan_cadence: str
+    last_planned_at: datetime | None
 
 
 class AutopilotUpdate(BaseModel):
@@ -372,6 +376,22 @@ class AutopilotUpdate(BaseModel):
     daily_send_cap: int | None = Field(default=None, ge=1)
     quiet_hours_start: int | None = Field(default=None, ge=0, le=23)
     quiet_hours_end: int | None = Field(default=None, ge=0, le=23)
+    # Planner schedule (per business). plan_day: 0=Monday..6=Sunday;
+    # plan_hour: 0-23 business-local; plan_cadence: daily | weekly | biweekly.
+    # Daily drafts every day at plan_hour (plan_day is ignored).
+    plan_day: int | None = Field(default=None, ge=0, le=6)
+    plan_hour: int | None = Field(default=None, ge=0, le=23)
+    plan_cadence: Literal["daily", "weekly", "biweekly"] | None = None
+
+    @field_validator("plan_cadence", mode="before")
+    @classmethod
+    def _normalize_cadence(cls, v: object) -> object:
+        # Defensive: a corrupted value like "'weekly'" (literal quotes, seen
+        # in the wild) would otherwise 422 forever on every save. Strip
+        # surrounding whitespace/quotes so the schedule stays editable.
+        if isinstance(v, str):
+            v = v.strip().strip("'\"").strip()
+        return v
 
 
 class PlanItem(BaseModel):
@@ -405,6 +425,17 @@ class PlanApproveIn(BaseModel):
 class PlanApproveOut(BaseModel):
     plan: ContentPlanOut
     campaign_id: uuid.UUID
+
+
+class PlanRunNowOut(BaseModel):
+    """Result of ``POST /autopilot/plan/run-now``.
+
+    ``created`` is False when a draft/approved plan already existed for
+    this week — the existing plan is returned instead of a duplicate.
+    """
+
+    plan: ContentPlanOut
+    created: bool
 
 
 # ---------------------------------------------------------------------------

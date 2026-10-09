@@ -319,7 +319,7 @@ export interface AutopilotSettings {
   /** Planner schedule (per business): 0=Monday..6=Sunday, local hour 0-23. */
   plan_day: number;
   plan_hour: number;
-  plan_cadence: "weekly" | "biweekly";
+  plan_cadence: "daily" | "weekly" | "biweekly";
   /** Most recent draft (cron or run-now); drives the biweekly gate. */
   last_planned_at: string | null;
 }

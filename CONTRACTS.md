@@ -86,6 +86,7 @@ generation job leaves it in `in_review` and a human approves via the approvals i
 - `GET/PUT /autopilot`
 - `GET /analytics/overview?days=30&campaign_id=` -> {sent, delivered, opened, clicked, converted, open_rate, ctr, conversion_rate, spend_usd, by_day:[...]}
 - `GET /analytics/campaigns/{id}/funnel` -> per-step {step_id, position, sent, opened, clicked}
+- `GET /ops/activity?limit=30` -> {as_of, stages: {foundation, origination, reach, growth, evidence} (each a {metric: count} map), counters: {sends_today, generations_today, in_flight}, activity: [{id, kind: generation|send|event, title, detail?, status?, at}]} — read-only mission-control aggregate; `as_of` is the data timestamp every panel shows
 - `GET /dev/outbox?limit=50`
 - `POST /webhooks/delivery` {provider_message_id, event: delivered|opened|clicked|bounced, contact?} — no auth (shared secret header `X-Webhook-Secret` = env WEBHOOK_SECRET)
 - `POST /events` {kind, contact_id?, payload?} — enqueue event-trigger processing
@@ -163,6 +164,6 @@ Pin versions in requirements.txt.
 
 ## Frontend routes
 
-`/` dashboard · `/onboarding` · `/campaigns` · `/campaigns/:id` · `/calendar`
+`/` dashboard · `/ops` mission control · `/onboarding` · `/campaigns` · `/campaigns/:id` · `/calendar`
 · `/approvals` · `/assets` · `/analytics` · `/outbox`
 Auth: JWT in localStorage, `Authorization: Bearer`. API client in `src/lib/api.ts`.

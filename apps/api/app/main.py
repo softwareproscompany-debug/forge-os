@@ -16,6 +16,7 @@ from app.routers import (
     campaigns,
     contacts,
     events,
+    ops,
     outbox,
     templates,
     webhooks,
@@ -56,6 +57,7 @@ def create_app() -> FastAPI:
         autopilot.router,
         analytics.router,
         outbox.router,
+        ops.router,
         webhooks.router,
         events.router,
     ):

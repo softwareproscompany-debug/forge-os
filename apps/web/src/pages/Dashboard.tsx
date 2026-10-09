@@ -8,7 +8,7 @@ import {
   formatPercent,
   normalizeRatio,
 } from "../lib/format";
-import { Badge, EmptyState, ErrorBanner, Spinner } from "../components/ui";
+import { Badge, EmptyState, ErrorBanner, PageHeader, Spinner, StatCard } from "../components/ui";
 
 function last7(byDay: AnalyticsOverview["by_day"]) {
   return byDay.slice(-7);
@@ -106,14 +106,25 @@ export default function DashboardPage() {
   const kpis = useMemo(() => {
     if (!overview) return [];
     return [
-      { label: "Sent (30d)", value: formatNumber(overview.sent) },
+      { label: "Sent (30d)", value: overview.sent },
       {
         label: "Open rate",
-        value: formatPercent(normalizeRatio(overview.open_rate)),
+        value: normalizeRatio(overview.open_rate) ?? 0,
+        format: (n: number) => formatPercent(n),
+        tone: "cyan" as const,
       },
-      { label: "CTR", value: formatPercent(normalizeRatio(overview.ctr)) },
-      { label: "Conversions", value: formatNumber(overview.converted) },
-      { label: "Spend", value: formatMoney(overview.spend_usd) },
+      {
+        label: "CTR",
+        value: normalizeRatio(overview.ctr) ?? 0,
+        format: (n: number) => formatPercent(n),
+      },
+      { label: "Conversions", value: overview.converted },
+      {
+        label: "Spend",
+        value: overview.spend_usd,
+        format: (n: number) => formatMoney(n),
+        tone: "cyan" as const,
+      },
     ];
   }, [overview]);
 
@@ -121,21 +132,27 @@ export default function DashboardPage() {
 
   return (
     <div>
-      <div className="page-head">
-        <h1>Dashboard</h1>
-        <Link to="/campaigns" className="btn btn-primary">
-          New campaign
-        </Link>
-      </div>
+      <PageHeader
+        title="Dashboard"
+        subtitle="Thirty-day command view — launch, review, measure."
+        actions={
+          <Link to="/campaigns" className="btn btn-primary">
+            New campaign
+          </Link>
+        }
+      />
 
       <ErrorBanner error={error} onRetry={load} />
 
       <div className="kpi-grid">
         {kpis.map((k) => (
-          <div key={k.label} className="card kpi">
-            <div className="kpi-label">{k.label}</div>
-            <div className="kpi-value">{k.value}</div>
-          </div>
+          <StatCard
+            key={k.label}
+            label={k.label}
+            value={k.value}
+            tone={"tone" in k ? k.tone : undefined}
+            format={"format" in k ? k.format : undefined}
+          />
         ))}
       </div>
 

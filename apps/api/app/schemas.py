@@ -444,3 +444,30 @@ class EventResponse(BaseModel):
     event_id: uuid.UUID
     job_id: str | None
     warning: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Ops / mission control (read-only aggregate for the /ops dashboard)
+# ---------------------------------------------------------------------------
+
+
+class OpsActivityItem(BaseModel):
+    id: str
+    kind: Literal["generation", "send", "event"]
+    title: str
+    detail: str | None
+    status: str | None
+    at: datetime
+
+
+class OpsCounters(BaseModel):
+    sends_today: int
+    generations_today: int
+    in_flight: int
+
+
+class OpsActivityResponse(BaseModel):
+    as_of: datetime
+    stages: dict[str, dict[str, int]]
+    counters: OpsCounters
+    activity: list[OpsActivityItem]

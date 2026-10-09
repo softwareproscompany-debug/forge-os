@@ -969,3 +969,144 @@ class StripeOrderEventOut(ORMModel):
     stripe_event_id: str
     event_type: str
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Travel Agency workspace (Phase 1: CRM foundation)
+# ---------------------------------------------------------------------------
+
+
+class TravelCustomerBase(BaseModel):
+    name: str = Field(max_length=255)
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=64)
+    type: str = Field(default="individual", pattern="^(individual|corporate)$")
+    notes: str | None = None
+
+
+class TravelCustomerCreate(TravelCustomerBase):
+    pass
+
+
+class TravelCustomerUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=255)
+    email: str | None = Field(default=None, max_length=255)
+    phone: str | None = Field(default=None, max_length=64)
+    type: str | None = Field(default=None, pattern="^(individual|corporate)$")
+    notes: str | None = None
+
+
+class TravelCustomerOut(TravelCustomerBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class TravelerProfileBase(BaseModel):
+    customer_id: uuid.UUID | None = None
+    full_name: str = Field(max_length=255)
+    dob: date | None = None
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    loyalty: dict[str, Any] = Field(default_factory=dict)
+    accessibility_notes: str | None = None
+
+
+class TravelerProfileCreate(TravelerProfileBase):
+    pass
+
+
+class TravelerProfileUpdate(BaseModel):
+    customer_id: uuid.UUID | None = None
+    full_name: str | None = Field(default=None, max_length=255)
+    dob: date | None = None
+    preferences: dict[str, Any] | None = None
+    loyalty: dict[str, Any] | None = None
+    accessibility_notes: str | None = None
+
+
+class TravelerProfileOut(TravelerProfileBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class TravelLeadBase(BaseModel):
+    customer_id: uuid.UUID | None = None
+    source: str | None = Field(default=None, max_length=64)
+    destination: str | None = Field(default=None, max_length=255)
+    date_start: date | None = None
+    date_end: date | None = None
+    budget: Decimal | None = Field(default=None, ge=0)
+    trip_purpose: str | None = Field(default=None, max_length=255)
+    assigned_to: uuid.UUID | None = None
+    status: str = Field(default="new")
+
+
+class TravelLeadCreate(TravelLeadBase):
+    pass
+
+
+class TravelLeadUpdate(BaseModel):
+    customer_id: uuid.UUID | None = None
+    source: str | None = Field(default=None, max_length=64)
+    destination: str | None = Field(default=None, max_length=255)
+    date_start: date | None = None
+    date_end: date | None = None
+    budget: Decimal | None = Field(default=None, ge=0)
+    trip_purpose: str | None = Field(default=None, max_length=255)
+    assigned_to: uuid.UUID | None = None
+
+
+class TravelLeadStatusUpdate(BaseModel):
+    status: str = Field(pattern="^(new|qualified|quoted|booked|lost)$")
+
+
+class TravelLeadOut(TravelLeadBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class TripRequestBase(BaseModel):
+    lead_id: uuid.UUID | None = None
+    customer_id: uuid.UUID | None = None
+    party_size: int = Field(default=1, ge=1, le=500)
+    origin: str | None = Field(default=None, max_length=255)
+    destinations: list[str] = Field(default_factory=list)
+    date_start: date | None = None
+    date_end: date | None = None
+    preferences: dict[str, Any] = Field(default_factory=dict)
+    flexibility: str | None = Field(default=None, max_length=255)
+    status: str = Field(default="open")
+
+
+class TripRequestCreate(TripRequestBase):
+    pass
+
+
+class TripRequestUpdate(BaseModel):
+    lead_id: uuid.UUID | None = None
+    customer_id: uuid.UUID | None = None
+    party_size: int | None = Field(default=None, ge=1, le=500)
+    origin: str | None = Field(default=None, max_length=255)
+    destinations: list[str] | None = None
+    date_start: date | None = None
+    date_end: date | None = None
+    preferences: dict[str, Any] | None = None
+    flexibility: str | None = Field(default=None, max_length=255)
+    status: str | None = Field(
+        default=None, pattern="^(draft|open|in_progress|completed|cancelled)$"
+    )
+
+
+class TripRequestOut(TripRequestBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    created_at: datetime
+
+
+class TravelDashboardOut(BaseModel):
+    lead_counts: dict[str, int]
+    recent_leads: list[TravelLeadOut]
+    customer_count: int
+    trip_request_count: int

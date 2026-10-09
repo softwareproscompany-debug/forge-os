@@ -576,7 +576,53 @@ export const autopilotApi = {
       body: data,
     });
   },
+  /** Latest content plan, or null when the planner has never drafted one (404). */
+  plan(): Promise<ContentPlan | null> {
+    return apiFetch<ContentPlan>("/autopilot/plan").catch((err) => {
+      if (err instanceof ApiError && err.status === 404) return null;
+      throw err;
+    });
+  },
+  approvePlan(planId: string): Promise<PlanApproveOut> {
+    return apiFetch<PlanApproveOut>("/autopilot/plan/approve", {
+      method: "POST",
+      body: { plan_id: planId },
+    });
+  },
 };
+
+/* ------------------------------------------------------------------ */
+/* Autopilot weekly plan (Card 4)                                       */
+/* ------------------------------------------------------------------ */
+
+export type PlanStatus = "draft" | "approved" | "rejected";
+
+export interface PlanItem {
+  kind: AssetKind;
+  channel: Channel;
+  day: number;
+  title: string;
+  brief: string;
+  asset_id: string | null;
+}
+
+export interface ContentPlan {
+  id: string;
+  business_id: string;
+  week_start: string;
+  status: PlanStatus;
+  items: PlanItem[];
+  created_by: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  campaign_id: string | null;
+  created_at: string;
+}
+
+export interface PlanApproveOut {
+  plan: ContentPlan;
+  campaign_id: string;
+}
 
 export const analyticsApi = {
   overview(params?: { days?: number; campaign_id?: string }): Promise<AnalyticsOverview> {
@@ -630,5 +676,78 @@ export const opsApi = {
     return apiFetch<OpsActivityResponse>("/ops/activity", {
       params: { limit },
     });
+  },
+};
+
+/* ------------------------------------------------------------------ */
+/* Interview (Card 0 guided interview)                                 */
+/* ------------------------------------------------------------------ */
+
+export type InterviewStatus = "active" | "completed" | "abandoned";
+
+export interface InterviewQuestionState {
+  session_id: string;
+  status: InterviewStatus;
+  question_index: number;
+  total_questions: number;
+  question: string | null;
+  done: boolean;
+}
+
+export interface DraftBrandKit {
+  name: string;
+  voice_description: string | null;
+  tone_tags: string[];
+  primary_color: string | null;
+  secondary_color: string | null;
+  fonts: Record<string, string>;
+  icp_description: string | null;
+  do_list: string[];
+  dont_list: string[];
+}
+
+export interface InterviewFinishState {
+  session_id: string;
+  status: InterviewStatus;
+  draft_brand_kit: DraftBrandKit;
+}
+
+export interface BrandKitOverrides {
+  name?: string;
+  voice_description?: string | null;
+  tone_tags?: string[];
+  primary_color?: string | null;
+  secondary_color?: string | null;
+  fonts?: Record<string, string>;
+  icp_description?: string | null;
+  do_list?: string[];
+  dont_list?: string[];
+}
+
+export const interviewApi = {
+  start(): Promise<InterviewQuestionState> {
+    return apiFetch<InterviewQuestionState>("/interview/start", {
+      method: "POST",
+    });
+  },
+  answer(sessionId: string, answer: string): Promise<InterviewQuestionState> {
+    return apiFetch<InterviewQuestionState>(`/interview/${sessionId}/answer`, {
+      method: "POST",
+      body: { answer },
+    });
+  },
+  finish(sessionId: string): Promise<InterviewFinishState> {
+    return apiFetch<InterviewFinishState>(`/interview/${sessionId}/finish`, {
+      method: "POST",
+    });
+  },
+  confirm(
+    sessionId: string,
+    overrides?: BrandKitOverrides,
+  ): Promise<{ brand_kit: BrandKit }> {
+    return apiFetch<{ brand_kit: BrandKit }>(
+      `/interview/${sessionId}/confirm`,
+      { method: "POST", body: { overrides: overrides ?? null } },
+    );
   },
 };

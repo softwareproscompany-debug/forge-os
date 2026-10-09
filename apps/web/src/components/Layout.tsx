@@ -9,12 +9,14 @@ const NAV = [
   { to: "/", label: "Dashboard", icon: "◈", end: true },
   { to: "/ops", label: "Mission Control", icon: "⬢" },
   { to: "/campaigns", label: "Campaigns", icon: "✉" },
+  { to: "/autopilot", label: "Autopilot", icon: "✦" },
   { to: "/calendar", label: "Calendar", icon: "▦" },
   { to: "/approvals", label: "Approvals", icon: "✓" },
   { to: "/assets", label: "Assets", icon: "◫" },
   { to: "/analytics", label: "Analytics", icon: "◔" },
   { to: "/outbox", label: "Outbox", icon: "⎋" },
   { to: "/onboarding", label: "Onboarding", icon: "⚙" },
+  { to: "/interview", label: "Interview", icon: "❝" },
 ] as const;
 
 /** Redirects to /login when there is no authenticated user. */

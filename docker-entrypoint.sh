@@ -11,7 +11,7 @@ set -eu
 echo "[entrypoint] running database migrations..."
 
 MIGRATED=0
-for d in /app/packages/forge-db /app/forge-db /packages/forge-db /opt/forge-db .; do
+for d in /srv/forge-os/packages/forge-db /app/packages/forge-db /app/forge-db /packages/forge-db /opt/forge-db .; do
   if [ -f "$d/alembic/alembic.ini" ]; then
     echo "[entrypoint] forge-db found at $d"
     (cd "$d" && alembic -c alembic/alembic.ini upgrade head)
@@ -22,7 +22,7 @@ done
 
 if [ "$MIGRATED" = "0" ]; then
   echo "[entrypoint] WARNING: no forge-db alembic.ini found; skipping migrations." >&2
-  echo "[entrypoint] Searched: /app/packages/forge-db /app/forge-db /packages/forge-db /opt/forge-db ." >&2
+  echo "[entrypoint] Searched: /srv/forge-os/packages/forge-db /app/packages/forge-db /app/forge-db /packages/forge-db /opt/forge-db ." >&2
 fi
 
 echo "[entrypoint] starting: $*"

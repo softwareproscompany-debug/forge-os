@@ -41,8 +41,8 @@ services:
 
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./apps/api/Dockerfile
     restart: unless-stopped
     env_file:
       - path: ./.env
@@ -94,8 +94,8 @@ services:
 
   worker:
     build:
-      context: ./apps/worker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./apps/worker/Dockerfile
     restart: unless-stopped
     env_file:
       - path: ./.env

@@ -34,6 +34,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     Response,
     status,
 )
@@ -54,6 +55,7 @@ from forge_llm import GenerationRequest, get_provider
 
 from app import draven_swarm as swarm
 from app.core.deps import CurrentSettings, CurrentUser, DbSession, require_role
+from app.core.rate_limit import quota_limited
 from app.draven_crypto import decrypt_secret, encrypt_secret, get_fernet
 from app import draven_conversation as conversation
 from app.draven_conversation import PendingIntent
@@ -356,7 +358,7 @@ class VoicesOut(BaseModel):
 
 class SpeakIn(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
-    voice_id: str = Field(min_length=1, max_length=64)
+    voice_id: str | None = Field(default=None, max_length=64)
     model_id: str = Field(default="eleven_multilingual_v2", max_length=64)
     output_format: str = Field(default="mp3_44100_192", max_length=32)
 
@@ -1148,8 +1150,10 @@ def list_tools(user: CurrentUser) -> list[ToolInfo]:
 
 
 @router.post("/chat", response_model=DravenChatResponse)
+@quota_limited("draven")
 async def chat(
     payload: DravenChatRequest,
+    request: Request,
     user: CurrentUser,
     db: DbSession,
     settings: CurrentSettings,
@@ -1757,7 +1761,7 @@ async def tts_speak(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="text must not be blank",
         )
-    if not _VOICE_ID_RE.match(payload.voice_id):
+    if payload.voice_id is not None and not _VOICE_ID_RE.match(payload.voice_id):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="invalid voice_id format",
@@ -1791,13 +1795,21 @@ async def tts_speak(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="could not validate voice_id (ElevenLabs upstream error)",
         )
-    if payload.voice_id not in {v.get("voice_id") for v in voices}:
+    # No voice selected yet (e.g. fresh setup): fall back to the account's
+    # first voice instead of failing the request — the UI stayed silent.
+    voice_id = payload.voice_id or (voices[0].get("voice_id") if voices else None)
+    if voice_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="no voices available on this ElevenLabs account",
+        )
+    if voice_id not in {v.get("voice_id") for v in voices}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="unknown voice_id for this account",
         )
 
-    path = _ELEVENLABS_TTS_PATH.format(voice_id=payload.voice_id)
+    path = _ELEVENLABS_TTS_PATH.format(voice_id=voice_id)
     started = time.monotonic()
     try:
         resp = await _elevenlabs_api(
@@ -1831,7 +1843,7 @@ async def tts_speak(
         user,
         "draven.tts_speak",
         "low",
-        {"voice_id": payload.voice_id, "model_id": payload.model_id,
+        {"voice_id": voice_id, "model_id": payload.model_id,
          "output_format": payload.output_format, "chars": chars},
         {
             "tool": "draven.tts_speak",
@@ -2030,8 +2042,10 @@ def swarm_agents(user: CurrentUser) -> list[SwarmAgentInfo]:
 
 
 @router.post("/swarm/run", response_model=SwarmRunOut, status_code=202)
+@quota_limited("draven")
 async def swarm_run(
     payload: SwarmRunIn,
+    request: Request,
     user: CurrentUser,
     db: DbSession,
     settings: CurrentSettings,

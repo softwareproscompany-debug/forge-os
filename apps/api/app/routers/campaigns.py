@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from sqlalchemy import func
 
+from forge_db.audit import log_action
 from forge_db.models import (
     Asset,
     AssetStatus,
@@ -31,6 +32,7 @@ from app.core.deps import (
     paginate,
     scoped,
 )
+from app.core.rate_limit import client_ip
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 
@@ -197,7 +199,12 @@ def _assert_launchable(db: DbSession, campaign: Campaign) -> None:
 
 
 @router.post("/{campaign_id}/launch", response_model=schemas.CampaignOut)
-def launch_campaign(campaign_id: uuid.UUID, user: CurrentUser, db: DbSession):
+def launch_campaign(
+    campaign_id: uuid.UUID,
+    request: Request,
+    user: CurrentUser,
+    db: DbSession,
+):
     campaign = _get_campaign(campaign_id, user, db)
     if campaign.status not in (
         CampaignStatus.draft,
@@ -212,6 +219,18 @@ def launch_campaign(campaign_id: uuid.UUID, user: CurrentUser, db: DbSession):
     campaign.status = CampaignStatus.running
     db.commit()
     db.refresh(campaign)
+    log_action(
+        db,
+        action="campaign.launch",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        resource_type="campaign",
+        resource_id=str(campaign.id),
+        details={"name": campaign.name},
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     return campaign
 
 

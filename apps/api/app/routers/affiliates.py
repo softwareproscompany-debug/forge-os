@@ -18,13 +18,14 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import RedirectResponse
 
 from forge_db.models import AffiliateLink, AffiliateProgram, Event
 
 from app import schemas
 from app.core.deps import (
+    CurrentSettings,
     CurrentUser,
     DbSession,
     clamp_pagination,
@@ -32,6 +33,7 @@ from app.core.deps import (
     paginate,
     scoped,
 )
+from app.core.rate_limit import quota_limited
 
 router = APIRouter(prefix="/affiliates", tags=["affiliates"])
 
@@ -383,6 +385,453 @@ def affiliate_earnings(
     return schemas.AffiliateEarningsResponse(
         days=days, totals=totals, per_program=per_program, per_link=per_link
     )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard — one call for the Overview tab
+# ---------------------------------------------------------------------------
+
+
+@router.get("/dashboard", response_model=schemas.AffiliateDashboardResponse)
+def affiliate_dashboard(
+    user: CurrentUser,
+    db: DbSession,
+    days: int = Query(default=30, ge=1, le=365),
+):
+    """Aggregated dashboard data: totals, per-program stats, top links,
+    daily series for the chart, and recent click/conversion activity.
+
+    All numbers come from stored ``affiliate_clicked`` /
+    ``affiliate_converted`` events — honestly zero when nothing happened.
+    """
+    since = _utcnow() - timedelta(days=days)
+    totals, per_program, per_link = _earnings_stats(db, user.business_id, since)
+
+    # Daily series for the chart.
+    links = {
+        link.id: link
+        for link in db.query(AffiliateLink)
+        .filter(AffiliateLink.business_id == user.business_id)
+        .all()
+    }
+    events = (
+        db.query(Event.kind, Event.payload, Event.created_at)
+        .filter(
+            Event.business_id == user.business_id,
+            Event.kind.in_(["affiliate_clicked", "affiliate_converted"]),
+            Event.created_at >= since,
+        )
+        .all()
+    )
+    by_day: dict[str, dict[str, object]] = {}
+    today = _utcnow().date()
+    for i in range(days):
+        d = (today - timedelta(days=days - 1 - i)).isoformat()
+        by_day[d] = {"clicks": 0, "conversions": 0, "earnings": Decimal("0")}
+    for kind, payload, created_at in events:
+        day = created_at.date().isoformat()
+        slot = by_day.get(day)
+        if slot is None:
+            continue
+        if kind == "affiliate_clicked":
+            slot["clicks"] = int(slot["clicks"]) + 1
+        elif kind == "affiliate_converted":
+            slot["conversions"] = int(slot["conversions"]) + 1
+            try:
+                commission = Decimal(str((payload or {}).get("commission_usd") or "0"))
+            except Exception:
+                commission = Decimal("0")
+            slot["earnings"] = Decimal(slot["earnings"]) + commission
+    daily = [
+        schemas.AffiliateDailyPoint(
+            date=d,
+            clicks=int(v["clicks"]),
+            conversions=int(v["conversions"]),
+            earnings_usd=float(Decimal(v["earnings"])),
+        )
+        for d, v in sorted(by_day.items())
+    ]
+
+    # Recent activity (latest 15 events with link/program names).
+    programs = {
+        p.id: p
+        for p in db.query(AffiliateProgram)
+        .filter(AffiliateProgram.business_id == user.business_id)
+        .all()
+    }
+    recent_events = (
+        db.query(Event)
+        .filter(
+            Event.business_id == user.business_id,
+            Event.kind.in_(["affiliate_clicked", "affiliate_converted"]),
+        )
+        .order_by(Event.created_at.desc())
+        .limit(15)
+        .all()
+    )
+    recent_activity: list[schemas.AffiliateActivityItem] = []
+    for ev in recent_events:
+        payload = ev.payload or {}
+        link = None
+        try:
+            link_id = uuid.UUID(str(payload.get("link_id") or ""))
+            link = links.get(link_id)
+        except (ValueError, AttributeError, TypeError):
+            pass
+        program = programs.get(link.program_id) if link else None
+        commission = None
+        if ev.kind == "affiliate_converted":
+            try:
+                commission = float(payload.get("commission_usd") or 0)
+            except (ValueError, TypeError):
+                commission = 0.0
+        recent_activity.append(
+            schemas.AffiliateActivityItem(
+                kind=ev.kind,
+                link_label=link.label if link else "unknown link",
+                program_name=program.name if program else "",
+                commission_usd=commission,
+                created_at=ev.created_at,
+            )
+        )
+
+    return schemas.AffiliateDashboardResponse(
+        days=days,
+        totals=totals,
+        per_program=per_program,
+        top_links=per_link[:5],
+        daily=daily,
+        recent_activity=recent_activity,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Viator network integration (one of many — see Programs for any network)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/viator/search")
+async def viator_search(
+    payload: schemas.ViatorSearchRequest, user: CurrentUser, db: DbSession
+):
+    """Live Viator product search (no DB writes). destination_id OR keyword."""
+    from app.affiliate.connectors.viator import (
+        ViatorAuthError,
+        ViatorError,
+        ViatorNotConfigured,
+        connector_for_business,
+    )
+    from app.core.config import get_settings
+
+    if not payload.destination_id and not payload.keyword:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide destination_id or keyword.",
+        )
+    settings = get_settings()
+    try:
+        connector = connector_for_business(db, user.business_id, settings)
+    except ViatorNotConfigured as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    try:
+        products: list[dict] = []
+        if payload.destination_id:
+            products = await connector.search_products(
+                payload.destination_id, count=payload.count
+            )
+        if not products and payload.keyword:
+            products = await connector.freetext_search(
+                payload.keyword, count=payload.count
+            )
+    except ViatorAuthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+        ) from exc
+    except ViatorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Viator search failed: {exc}",
+        ) from exc
+    return {"count": len(products), "products": products}
+
+
+@router.post("/viator/import", response_model=schemas.ViatorImportResponse)
+def viator_import(
+    payload: schemas.ViatorImportRequest, user: CurrentUser, db: DbSession
+):
+    """Import Viator products (from /viator/search results) as programs."""
+    from app.affiliate import viator_service
+
+    products = [p.model_dump(exclude_none=False) for p in payload.products]
+    items = viator_service.import_products(
+        db, user.business_id, products, actor_id=user.id
+    )
+    imported = sum(1 for i in items if i.get("imported"))
+    return schemas.ViatorImportResponse(
+        imported=imported, skipped=len(items) - imported, items=items
+    )
+
+
+@router.post("/viator/generate-ads")
+@quota_limited("generation")
+def viator_generate_ads(
+    request: Request,
+    user: CurrentUser,
+    db: DbSession,
+    settings: CurrentSettings,
+    payload: schemas.ViatorGenerateAdsRequest | None = None,
+):
+    """Generate draft ad assets for Viator programs (FTC disclosure included,
+    never auto-published). When program_ids is omitted, targets Viator
+    programs with no ad yet."""
+    from app.affiliate import viator_service
+
+    program_ids = payload.program_ids if payload else None
+    ads = viator_service.generate_ads(
+        db, user.business_id, program_ids, actor_id=user.id
+    )
+    return {"ads_created": len(ads), "ads": ads}
+
+
+# ---------------------------------------------------------------------------
+# Automation rules — scheduled affiliate pipeline (discover → import →
+# ads → draft campaigns). Everything lands as drafts; nothing auto-publishes
+# or auto-launches.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/automation/rules", response_model=list[schemas.AffiliateAutomationRuleOut])
+def list_automation_rules(user: CurrentUser, db: DbSession):
+    from forge_db.models import AffiliateAutomationRule
+
+    return (
+        db.query(AffiliateAutomationRule)
+        .filter(AffiliateAutomationRule.business_id == user.business_id)
+        .order_by(AffiliateAutomationRule.created_at.desc())
+        .all()
+    )
+
+
+@router.post(
+    "/automation/rules",
+    response_model=schemas.AffiliateAutomationRuleOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_automation_rule(
+    payload: schemas.AffiliateAutomationRuleCreate, user: CurrentUser, db: DbSession
+):
+    from forge_db.models import AffiliateAutomationRule
+
+    rule = AffiliateAutomationRule(
+        business_id=user.business_id,
+        name=payload.name,
+        rule_type=payload.rule_type,
+        network=payload.network,
+        config=payload.config,
+        schedule=payload.schedule,
+        enabled=payload.enabled,
+    )
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.patch(
+    "/automation/rules/{rule_id}",
+    response_model=schemas.AffiliateAutomationRuleOut,
+)
+def update_automation_rule(
+    rule_id: uuid.UUID,
+    payload: schemas.AffiliateAutomationRuleUpdate,
+    user: CurrentUser,
+    db: DbSession,
+):
+    from forge_db.models import AffiliateAutomationRule
+
+    rule = get_owned_or_404(db, AffiliateAutomationRule, rule_id, user)
+    for field in ("name", "config", "schedule", "enabled"):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(rule, field, value)
+    db.commit()
+    db.refresh(rule)
+    return rule
+
+
+@router.delete("/automation/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_automation_rule(rule_id: uuid.UUID, user: CurrentUser, db: DbSession):
+    from forge_db.models import AffiliateAutomationRule
+
+    rule = get_owned_or_404(db, AffiliateAutomationRule, rule_id, user)
+    db.delete(rule)
+    db.commit()
+
+
+@router.post("/automation/rules/{rule_id}/run")
+def run_automation_rule_now(rule_id: uuid.UUID, user: CurrentUser, db: DbSession):
+    """Manually trigger a rule immediately (also how scheduled runs execute)."""
+    from forge_db.models import AffiliateAutomationRule
+
+    rule = get_owned_or_404(db, AffiliateAutomationRule, rule_id, user)
+    result = _execute_automation_rule(db, user, rule)
+    rule.last_run_at = _utcnow()
+    rule.last_run_result = result.get("summary", "")
+    db.commit()
+    return result
+
+
+@router.get("/alerts", response_model=list[schemas.AffiliateAlert])
+def affiliate_alerts(
+    user: CurrentUser,
+    db: DbSession,
+    days: int = Query(default=30, ge=1, le=365),
+    min_clicks: int = Query(default=50, ge=10, description="Clicks threshold for underperforming flag"),
+):
+    """Smart triggers: underperforming links, programs without ads, etc."""
+    from forge_db.models import Asset, AssetKind, AssetStatus
+
+    since = _utcnow() - timedelta(days=days)
+    _, per_program, per_link = _earnings_stats(db, user.business_id, since)
+    alerts: list[schemas.AffiliateAlert] = []
+
+    # Links with significant clicks but zero conversions.
+    for stat in per_link:
+        if stat.clicks >= min_clicks and stat.conversions == 0:
+            alerts.append(
+                schemas.AffiliateAlert(
+                    alert_type="underperforming_link",
+                    severity="warning",
+                    title=f"Link '{stat.label}' has {stat.clicks} clicks, 0 conversions",
+                    detail=(
+                        f"'{stat.label}' ({stat.program_name}) is getting traffic "
+                        f"but nothing converts. Consider better ad copy, a different "
+                        f"offer, or pausing the link."
+                    ),
+                    link_id=stat.link_id,
+                )
+            )
+
+    # Programs with no draft ad creative.
+    programs_with_ads = {
+        a.title for a in db.query(Asset)
+        .filter(
+            Asset.business_id == user.business_id,
+            Asset.kind == AssetKind.ad,
+            Asset.is_affiliate_content.is_(True),
+        )
+        .all()
+    }
+    programs = (
+        db.query(AffiliateProgram)
+        .filter(
+            AffiliateProgram.business_id == user.business_id,
+            AffiliateProgram.status == "active",
+        )
+        .all()
+    )
+    for program in programs:
+        if not any(program.name[:40] in (t or "") for t in programs_with_ads):
+            alerts.append(
+                schemas.AffiliateAlert(
+                    alert_type="no_ads",
+                    severity="info",
+                    title=f"Program '{program.name}' has no ad creative",
+                    detail=(
+                        "No draft ads exist for this program. Generate some from "
+                        "the Creatives tab or enable auto-ads."
+                    ),
+                    program_id=program.id,
+                )
+            )
+    return alerts
+
+
+def _execute_automation_rule(db, user, rule) -> dict:
+    """Execute one automation rule synchronously. Returns a result summary."""
+    from app.affiliate import viator_service
+
+    cfg = rule.config or {}
+    summary_parts: list[str] = []
+
+    if rule.rule_type in ("auto_import", "autopilot_sweep"):
+        # Discover products from the network.
+        products: list[dict] = []
+        if rule.network == "viator":
+            import asyncio
+            from app.affiliate.connectors.viator import connector_for_business
+            from app.core.config import get_settings
+
+            settings = get_settings()
+            connector = connector_for_business(db, user.business_id, settings)
+            count = int(cfg.get("count", 10))
+            dest = cfg.get("destination_id")
+            keyword = cfg.get("keyword")
+            min_rating = cfg.get("min_rating")
+
+            async def _search():
+                out: list[dict] = []
+                if dest:
+                    out = await connector.search_products(int(dest), count=count)
+                if not out and keyword:
+                    out = await connector.freetext_search(str(keyword), count=count)
+                return out
+
+            products = asyncio.run(_search())
+            if min_rating:
+                try:
+                    mr = float(min_rating)
+                    products = [
+                        p for p in products
+                        if (p.get("rating") or 0) >= mr
+                    ]
+                except (ValueError, TypeError):
+                    pass
+            items = viator_service.import_products(
+                db, user.business_id, products, actor_id=user.id
+            )
+            imported = sum(1 for i in items if i.get("imported"))
+            summary_parts.append(f"imported {imported} products")
+        else:
+            summary_parts.append(f"network '{rule.network}' has no auto-import connector yet")
+
+    if rule.rule_type in ("auto_ads", "autopilot_sweep"):
+        if rule.network == "viator":
+            program_ids = cfg.get("program_ids")
+            if program_ids:
+                try:
+                    program_ids = [uuid.UUID(str(pid)) for pid in program_ids]
+                except (ValueError, AttributeError):
+                    program_ids = None
+            ads = viator_service.generate_ads(
+                db, user.business_id, program_ids, actor_id=user.id
+            )
+            summary_parts.append(f"generated {len(ads)} draft ads")
+        else:
+            summary_parts.append(
+                f"auto-ads not yet supported for network '{rule.network}' "
+                "(create creatives manually)"
+            )
+
+    if rule.rule_type == "autopilot_sweep" and cfg.get("create_campaign"):
+        from forge_db.models import Campaign, CampaignStatus
+
+        template = cfg.get("campaign_name_template") or "Affiliate Sweep {date}"
+        name = template.replace("{date}", _utcnow().date().isoformat())
+        campaign = Campaign(
+            business_id=user.business_id,
+            created_by=user.id,
+            name=name,
+            description=f"Auto-created by rule '{rule.name}' (draft).",
+            status=CampaignStatus.draft,
+        )
+        db.add(campaign)
+        db.commit()
+        summary_parts.append(f"created draft campaign '{name}'")
+
+    return {"rule_id": str(rule.id), "summary": "; ".join(summary_parts) or "nothing to do"}
 
 
 # ---------------------------------------------------------------------------

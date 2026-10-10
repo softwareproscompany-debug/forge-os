@@ -161,6 +161,7 @@ jobs:
             flyctl redis create \
               --name forgeos-redis \
               --region dfw \
+              --plan pay-as-you-go \
               --no-replicas \
               --disable-eviction \
               --org personal >/dev/null

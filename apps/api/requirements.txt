@@ -3,7 +3,7 @@
 # are installed separately: `pip install -e ../packages/forge-*` for local
 # dev, or `pip install ./packages/forge-*` inside Docker (see Dockerfile).
 
-fastapi==0.145.0
+fastapi==0.143.0
 uvicorn[standard]==0.54.0
 sqlalchemy==2.0.36
 psycopg2-binary==2.9.10

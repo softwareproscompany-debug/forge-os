@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
+from forge_db.audit import log_action
 from forge_db.models import (
     ApprovalDecision,
 
@@ -40,13 +41,16 @@ from app.core.deps import (
     scoped,
 )
 from app.core.queue import enqueue_job
+from app.core.rate_limit import client_ip, quota_limited
 
 router = APIRouter(prefix="/assets", tags=["assets"])
 
 
 @router.post("/generate", response_model=schemas.AssetGenerateResponse, status_code=201)
+@quota_limited("generation")
 async def generate_asset(
     payload: schemas.AssetGenerateRequest,
+    request: Request,
     user: CurrentUser,
     db: DbSession,
     settings: CurrentSettings,
@@ -198,24 +202,52 @@ def submit_asset(asset_id: uuid.UUID, user: CurrentUser, db: DbSession):
 def approve_asset(
     asset_id: uuid.UUID,
     payload: schemas.AssetApprovalRequest,
+    request: Request,
     user: CurrentUser,
     db: DbSession,
 ):
     """Move ``in_review -> approved`` and record the approval."""
     asset = get_owned_or_404(db, Asset, asset_id, user)
-    return _transition(db, asset, AssetStatus.approved, reviewer=user, note=payload.note)
+    result = _transition(db, asset, AssetStatus.approved, reviewer=user, note=payload.note)
+    log_action(
+        db,
+        action="asset.approve",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        resource_type="asset",
+        resource_id=str(asset.id),
+        details={"kind": asset.kind.value if asset.kind else None},
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
 
 
 @router.post("/{asset_id}/reject", response_model=schemas.AssetOut)
 def reject_asset(
     asset_id: uuid.UUID,
     payload: schemas.AssetRejectRequest,
+    request: Request,
     user: CurrentUser,
     db: DbSession,
 ):
     """Move ``in_review -> rejected`` and record the rejection reason."""
     asset = get_owned_or_404(db, Asset, asset_id, user)
-    return _transition(db, asset, AssetStatus.rejected, reviewer=user, reason=payload.reason)
+    result = _transition(db, asset, AssetStatus.rejected, reviewer=user, reason=payload.reason)
+    log_action(
+        db,
+        action="asset.reject",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        resource_type="asset",
+        resource_id=str(asset.id),
+        details={"reason": payload.reason},
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return result
 
 
 @router.get("/{asset_id}/versions", response_model=schemas.Page[schemas.AssetOut])

@@ -22,8 +22,9 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from forge_db.audit import log_action
 from forge_db.models import (
     Asset,
     AssetStatus,
@@ -48,6 +49,7 @@ from app.core.deps import (
     scoped,
 )
 from app.core.queue import enqueue_and_await
+from app.core.rate_limit import client_ip
 
 router = APIRouter(prefix="/autopilot", tags=["autopilot"])
 
@@ -140,7 +142,10 @@ def get_plan(user: CurrentUser, db: DbSession):
 
 @router.post("/plan/approve", response_model=schemas.PlanApproveOut)
 def approve_plan(
-    payload: schemas.PlanApproveIn, user: CurrentUser, db: DbSession
+    payload: schemas.PlanApproveIn,
+    request: Request,
+    user: CurrentUser,
+    db: DbSession,
 ):
     """Approve a draft plan, materializing it into a running campaign.
 
@@ -209,6 +214,18 @@ def approve_plan(
 
     db.commit()
     db.refresh(plan)
+    log_action(
+        db,
+        action="autopilot.plan_approved",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        resource_type="content_plan",
+        resource_id=str(plan.id),
+        details={"campaign_id": str(campaign.id), "steps": len(ordered)},
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     return {"plan": plan, "campaign_id": campaign.id}
 
 

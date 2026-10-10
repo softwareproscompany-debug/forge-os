@@ -5,17 +5,19 @@ from __future__ import annotations
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 
 from forge_db.models import Business, User, UserRole
+from forge_db.audit import log_action
 
 from app import schemas
 from app.core.deps import CurrentSettings, CurrentUser, DbSession
+from app.core.rate_limit import check_login_rate_limit, client_ip
 from app.core.security import (
     create_access_token,
     get_password_hash,
-    verify_password,
+    verify_and_update,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -70,26 +72,98 @@ def register(payload: schemas.RegisterRequest, db: DbSession, settings: CurrentS
 
 @router.post("/login", response_model=schemas.TokenResponse)
 def login(
+    request: Request,
     db: DbSession,
     settings: CurrentSettings,
     form: OAuth2PasswordRequestForm = Depends(),
 ):
-    """OAuth2 password flow: ``username`` is the email address."""
+    """OAuth2 password flow: ``username`` is the email address.
+
+    Throttled per-IP (5/min) and per-account (10/hr); 429 + Retry-After
+    when exceeded. Successful logins transparently re-hash legacy
+    (low-round) password hashes to current OWASP parameters.
+    """
+    check_login_rate_limit(
+        request,
+        redis_url=settings.REDIS_URL,
+        account=form.username,
+        scope="login",
+    )
     user = db.query(User).filter(User.email == form.username).first()
-    if user is None or not verify_password(form.password, user.password_hash):
+    verified, new_hash = (
+        verify_and_update(form.password, user.password_hash)
+        if user is not None
+        else (False, None)
+    )
+    if user is None or not verified:
+        log_action(
+            db,
+            action="auth.login",
+            actor_email=form.username,
+            business_id=user.business_id if user is not None else None,
+            details={"result": "failure"},
+            ip_address=client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    if new_hash is not None:
+        # Transparent migration: old pbkdf2 rounds -> 600k, no flag day.
+        user.password_hash = new_hash
+        db.commit()
     if not user.is_active:
+        log_action(
+            db,
+            action="auth.login",
+            actor_id=str(user.id),
+            actor_email=user.email,
+            business_id=user.business_id,
+            details={"result": "failure", "reason": "disabled"},
+            ip_address=client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account is disabled",
         )
+    log_action(
+        db,
+        action="auth.login",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        details={"result": "success"},
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
     return schemas.TokenResponse(access_token=_issue_token(user, settings))
 
 
 @router.get("/me", response_model=schemas.UserOut)
 def me(user: CurrentUser):
+    return user
+
+
+@router.post("/logout")
+def logout(request: Request, user: CurrentUser, db: DbSession):
+    """Record a logout in the audit log.
+
+    Tokens are stateless JWTs — there is nothing server-side to revoke;
+    the client discards its token. This endpoint exists so the audit
+    trail captures session end.
+    """
+    log_action(
+        db,
+        action="auth.logout",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        details={"result": "success"},
+        ip_address=client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+    return {"status": "ok"}
     return user

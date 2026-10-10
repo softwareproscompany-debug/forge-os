@@ -41,7 +41,7 @@ def upgrade() -> None:
             "actor_type",
             sa.String(16),
             nullable=False,
-            server_default="user",
+            server_default=sa.text("'user'"),
         ),
         sa.Column("actor_id", sa.String(64), nullable=True),
         sa.Column("actor_email", sa.String(255), nullable=True),

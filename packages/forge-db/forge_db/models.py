@@ -94,6 +94,7 @@ __all__ = [
     "ActionEvidence",
     "LeadSource",
     "BusinessSecret",
+    "AuditLog",
 ]
 
 
@@ -267,6 +268,14 @@ class Business(Base):
     slug: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
     created_at: Mapped[datetime] = _created_at()
+
+    # Customer subscription billing (Stripe Checkout signup flow).
+    # subscription_status: none | pending | active | past_due | canceled
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stripe_session_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subscription_status: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    subscription_plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     users: Mapped[list["User"]] = relationship(back_populates="business", cascade="all, delete-orphan")
 
@@ -764,6 +773,50 @@ class AffiliateLink(Base):
     __table_args__ = (
         sa.UniqueConstraint(
             "business_id", "slug", name="uq_affiliate_links_biz_slug"
+        ),
+    )
+
+
+class AffiliateAutomationRule(Base):
+    """A scheduled automation rule for the affiliate pipeline.
+
+    ``rule_type`` is one of:
+    - ``auto_import`` — discover + import products from a network on schedule
+    - ``auto_ads`` — generate draft ads for programs missing them
+    - ``autopilot_sweep`` — full pipeline: discover → import → ads → draft campaign
+
+    ``config`` holds rule-specific settings (JSON):
+    - auto_import: {network, destination_id?, keyword?, count, min_rating?}
+    - auto_ads: {program_ids? (null = all missing), }
+    - autopilot_sweep: {network, destination_id?, keyword?, count,
+      create_campaign: bool, campaign_name_template?}
+
+    ``schedule`` is ``daily`` or ``weekly``; ``last_run_at`` tracks execution.
+    Rules never auto-publish or auto-launch — everything lands as drafts.
+    """
+
+    __tablename__ = "affiliate_automation_rules"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    business_id: Mapped[uuid.UUID] = _business_fk()
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    rule_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    network: Mapped[str] = mapped_column(String(64), nullable=False, default="viator")
+    config: Mapped[dict] = mapped_column(sa.JSON, nullable=False, default=dict)
+    schedule: Mapped[str] = mapped_column(String(16), nullable=False, default="weekly")
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, default=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(sa.DateTime(timezone=True), nullable=True)
+    last_run_result: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "rule_type IN ('auto_import', 'auto_ads', 'autopilot_sweep')",
+            name="ck_affiliate_rules_type",
+        ),
+        sa.CheckConstraint(
+            "schedule IN ('daily', 'weekly')",
+            name="ck_affiliate_rules_schedule",
         ),
     )
 
@@ -1880,4 +1933,50 @@ class TripRequest(Base):
 
     __table_args__ = (
         sa.Index("ix_trip_requests_biz_status", "business_id", "status"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Immutable audit log (migration 0017)
+# ---------------------------------------------------------------------------
+
+
+class AuditLog(Base):
+    """Append-only security audit trail.
+
+    Rows are NEVER updated or deleted: a Postgres trigger
+    (``audit_log_no_update_delete``) raises on any UPDATE/DELETE, and the
+    application layer only ever INSERTs and SELECTs. The writer lives in
+    ``forge_db.audit.log_action``.
+    """
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    created_at: Mapped[datetime] = _created_at()
+    actor_type: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="user"
+    )
+    actor_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    actor_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    business_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID,
+        ForeignKey("businesses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    resource_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(sa.Text, nullable=True)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "actor_type IN ('user', 'system', 'api_key')",
+            name="ck_audit_log_actor_type",
+        ),
+        sa.Index("ix_audit_log_biz_created", "business_id", "created_at"),
+        sa.Index("ix_audit_log_action_created", "action", "created_at"),
     )

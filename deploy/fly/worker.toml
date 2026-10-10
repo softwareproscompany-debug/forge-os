@@ -1,11 +1,11 @@
 # ForgeOS worker on Fly.io — arq background worker (no public ports).
 # Deploy from the repo root:
-#   fly deploy --config deploy/fly/worker.toml --dockerfile apps/worker/Dockerfile .
+#   fly deploy --config deploy/fly/worker.toml --remote-only .
 app = "forgeos-worker"
 primary_region = "dfw"
 
 [build]
-  dockerfile = "../../apps/worker/Dockerfile"
+  dockerfile = "apps/worker/Dockerfile"
 
 # No http_service: this machine only runs `arq worker.settings.WorkerSettings`
 # (the image CMD) and stays up to process the queue + cron jobs.

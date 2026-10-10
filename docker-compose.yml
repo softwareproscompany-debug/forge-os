@@ -50,9 +50,9 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://forge:forge@postgres:5432/forge}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      JWT_SECRET: ${JWT_SECRET:-}
       JWT_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-1440}
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-stub}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}
@@ -103,8 +103,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://forge:forge@postgres:5432/forge}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-dev-webhook-secret}
+      JWT_SECRET: ${JWT_SECRET:-}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-stub}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5-20250929}

@@ -275,8 +275,7 @@ jobs:
           echo "Deploying worker..."
           flyctl deploy \
             --remote-only \
-            --config deploy/fly/worker.toml \
-            --dockerfile apps/worker/Dockerfile . || {
+            --config deploy/fly/worker.toml . || {
             echo "::error::Worker deployment failed"
             exit 1
           }

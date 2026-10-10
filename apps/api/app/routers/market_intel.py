@@ -454,8 +454,8 @@ def list_sources(
             configured = conn.is_configured(settings)
             note = "configured" if configured else "not configured"
             ok: bool | None = True if configured else None
-        except Exception as exc:  # never let a health check crash the listing
-            configured, ok, note = False, False, str(exc)[:300]
+        except Exception:  # never let a health check crash the listing
+            configured, ok, note = False, False, "health check failed"
         row = (
             db.query(MarketSource)
             .filter(

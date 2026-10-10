@@ -6,7 +6,7 @@ app = "forgeos-web"
 primary_region = "dfw"
 
 [build]
-  dockerfile = "deploy/fly/Dockerfile.web"
+  dockerfile = "Dockerfile.web"
   [build.args]
     # The browser calls the API directly (CORS is open by default, see config).
     VITE_API_URL = "https://forgeos-api-app.fly.dev"

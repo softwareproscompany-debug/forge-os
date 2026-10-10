@@ -5,7 +5,7 @@ app = "forgeos-api-app"
 primary_region = "dfw"
 
 [build]
-  dockerfile = "apps/api/Dockerfile"
+  dockerfile = "../../apps/api/Dockerfile"
 
 [deploy]
   # Runs Alembic migrations before each deploy. Secrets (DATABASE_URL) are

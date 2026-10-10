@@ -4,7 +4,7 @@
 # packages live outside apps/worker:
 #   docker build -f apps/worker/Dockerfile -t forgeos-worker .
 #
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

@@ -101,7 +101,7 @@ jobs:
             echo "Creating Upstash Redis (forgeos-redis)..."
             OUT=$(flyctl redis create --name forgeos-redis --region dfw --no-replicas --org personal 2>&1)
             echo "$OUT"
-            REDIS_URL=$(echo "$OUT" | grep -oE 'redis://[^[:space:]""]+' | head -1)
+            REDIS_URL=$(echo "$OUT" | grep -oE 'redis://[^[:space:]"""]+' | head -1)
             if [ -z "$REDIS_URL" ]; then
               echo "::error::Could not parse REDIS_URL from redis create output"
               exit 1
@@ -138,10 +138,10 @@ jobs:
           done
 
       - name: Deploy API (runs Alembic migrations first)
-        run: flyctl deploy --remote-only --config deploy/fly/api.toml .
+        run: flyctl deploy --remote-only --config deploy/fly/api.toml --dockerfile apps/api/Dockerfile .
 
       - name: Deploy worker
-        run: flyctl deploy --remote-only --config deploy/fly/worker.toml .
+        run: flyctl deploy --remote-only --config deploy/fly/worker.toml --dockerfile apps/worker/Dockerfile .
 
       - name: Deploy web
         run: flyctl deploy --remote-only --config deploy/fly/web.toml .

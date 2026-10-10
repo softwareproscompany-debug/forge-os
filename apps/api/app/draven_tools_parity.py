@@ -585,6 +585,7 @@ _register(
 
 from fastapi import HTTPException as _HTTPException  # noqa: E402
 
+from forge_db.audit import log_action as _log_action  # noqa: E402
 from forge_db.models import (  # noqa: E402
     AffiliateLink,
     AffiliateProgram,
@@ -2131,6 +2132,21 @@ async def _campaign_enroll(
             }
         )
     db.commit()
+    _log_action(
+        db,
+        action="campaign.enroll",
+        actor_id=str(user.id),
+        actor_email=user.email,
+        business_id=user.business_id,
+        resource_type="campaign",
+        resource_id=str(campaign.id),
+        details={
+            "campaign_name": campaign.name,
+            "enrolled": len(enrolled),
+            "skipped_already_enrolled": skipped_duplicate,
+            "skipped_unsubscribed": skipped_unsubscribed,
+        },
+    )
     return _ok(
         {
             "campaign_id": str(campaign.id),

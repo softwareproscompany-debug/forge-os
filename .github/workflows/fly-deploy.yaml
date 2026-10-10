@@ -162,6 +162,8 @@ jobs:
               --name forgeos-redis \
               --region dfw \
               --plan pay-as-you-go \
+              --enable-auto-upgrade=false \
+              --enable-prodpack=false \
               --no-replicas \
               --disable-eviction \
               --org personal >/dev/null

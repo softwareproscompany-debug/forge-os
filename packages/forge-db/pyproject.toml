@@ -9,7 +9,7 @@ description = "ForgeOS database models, session helpers, and Alembic migrations"
 requires-python = ">=3.12"
 dependencies = [
     "sqlalchemy==2.0.36",
-    "psycopg2-binary==2.9.10",
+    "psycopg2-binary==2.9.13",
     "alembic==1.14.0",
 ]
 

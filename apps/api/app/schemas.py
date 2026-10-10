@@ -259,6 +259,14 @@ class TemplateBase(BaseModel):
     body_template: str
     variables: list[str] = Field(default_factory=list)
 
+    @field_validator("body_template", "subject_template")
+    @classmethod
+    def _strip_xss(cls, v: str | None) -> str | None:
+        # XSS hardening: strip script tags / event handlers at input.
+        from app.core.sanitize import sanitize_html
+
+        return sanitize_html(v)
+
 
 class TemplateCreate(TemplateBase):
     pass
@@ -270,6 +278,13 @@ class TemplateUpdate(BaseModel):
     subject_template: str | None = None
     body_template: str | None = None
     variables: list[str] | None = None
+
+    @field_validator("body_template", "subject_template")
+    @classmethod
+    def _strip_xss(cls, v: str | None) -> str | None:
+        from app.core.sanitize import sanitize_html
+
+        return sanitize_html(v)
 
 
 class TemplateOut(TemplateBase, ORMModel):
@@ -301,6 +316,14 @@ class AssetGenerateRequest(BaseModel):
     # Marks the asset as affiliate content so the FTC disclosure guardrail
     # applies (also auto-detected from /r/ links or program URLs).
     is_affiliate_content: bool = False
+
+    @field_validator("title", "prompt")
+    @classmethod
+    def _strip_xss(cls, v: str | None) -> str | None:
+        # XSS hardening: user prompt/title flows into generated asset body.
+        from app.core.sanitize import sanitize_html
+
+        return sanitize_html(v)
 
 
 class AssetGenerateResponse(BaseModel):
@@ -401,6 +424,13 @@ class CampaignBase(BaseModel):
     starts_at: datetime | None = None
     timezone: str = Field(default="UTC", max_length=64)
 
+    @field_validator("name", "description")
+    @classmethod
+    def _strip_xss(cls, v: str | None) -> str | None:
+        from app.core.sanitize import sanitize_html
+
+        return sanitize_html(v)
+
 
 class CampaignCreate(CampaignBase):
     pass
@@ -413,6 +443,13 @@ class CampaignUpdate(BaseModel):
     starts_at: datetime | None = None
     timezone: str | None = Field(default=None, max_length=64)
     status: Literal["draft", "scheduled", "running", "paused", "completed"] | None = None
+
+    @field_validator("name", "description")
+    @classmethod
+    def _strip_xss(cls, v: str | None) -> str | None:
+        from app.core.sanitize import sanitize_html
+
+        return sanitize_html(v)
 
 
 class CampaignOut(CampaignBase, ORMModel):
@@ -833,6 +870,106 @@ class AffiliateEarningsResponse(BaseModel):
     per_link: list[AffiliateLinkStats]
 
 
+class AffiliateDailyPoint(BaseModel):
+    """One day of affiliate activity for the dashboard chart."""
+
+    date: str  # YYYY-MM-DD
+    clicks: int
+    conversions: int
+    earnings_usd: float
+
+
+class AffiliateActivityItem(BaseModel):
+    """A recent click or conversion event for the activity feed."""
+
+    kind: str  # affiliate_clicked | affiliate_converted
+    link_label: str
+    program_name: str
+    commission_usd: float | None = None
+    created_at: datetime
+
+
+class AffiliateDashboardResponse(BaseModel):
+    """Everything the affiliate dashboard Overview tab needs in one call."""
+
+    days: int
+    totals: AffiliateTotals
+    per_program: list[AffiliateProgramStats]
+    top_links: list[AffiliateLinkStats]
+    daily: list[AffiliateDailyPoint]
+    recent_activity: list[AffiliateActivityItem]
+
+
+class ViatorSearchRequest(BaseModel):
+    """Live Viator product search. destination_id OR keyword (freetext)."""
+
+    destination_id: int | None = Field(default=None, ge=1)
+    keyword: str | None = Field(default=None, max_length=200)
+    count: int = Field(default=12, ge=1, le=25)
+
+
+class ViatorProductIn(BaseModel):
+    """One normalized Viator product, as returned by viator/search."""
+
+    model_config = {"extra": "allow"}
+
+    product_code: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=500)
+
+
+class ViatorImportRequest(BaseModel):
+    products: list[ViatorProductIn] = Field(min_length=1, max_length=25)
+
+
+class ViatorImportResponse(BaseModel):
+    imported: int
+    skipped: int
+    items: list[dict[str, Any]]
+
+
+class ViatorGenerateAdsRequest(BaseModel):
+    program_ids: list[uuid.UUID] | None = None
+
+
+class AffiliateAutomationRuleBase(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    rule_type: str = Field(pattern=r"^(auto_import|auto_ads|autopilot_sweep)$")
+    network: str = Field(default="viator", max_length=64)
+    config: dict[str, Any] = Field(default_factory=dict)
+    schedule: str = Field(default="weekly", pattern=r"^(daily|weekly)$")
+    enabled: bool = True
+
+
+class AffiliateAutomationRuleCreate(AffiliateAutomationRuleBase):
+    pass
+
+
+class AffiliateAutomationRuleUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    config: dict[str, Any] | None = None
+    schedule: str | None = Field(default=None, pattern=r"^(daily|weekly)$")
+    enabled: bool | None = None
+
+
+class AffiliateAutomationRuleOut(AffiliateAutomationRuleBase, ORMModel):
+    id: uuid.UUID
+    business_id: uuid.UUID
+    last_run_at: datetime | None = None
+    last_run_result: str | None = None
+    created_at: datetime
+
+
+class AffiliateAlert(BaseModel):
+    """A smart trigger alert for the dashboard."""
+
+    alert_type: str  # underperforming_link | earnings_spike | no_ads | stale_program
+    severity: str  # info | warning
+    title: str
+    detail: str
+    link_id: uuid.UUID | None = None
+    program_id: uuid.UUID | None = None
+
+
 class AffiliateConversionRequest(BaseModel):
     """Network postback stand-in: record a conversion for a link.
 
@@ -969,6 +1106,42 @@ class StripeOrderEventOut(ORMModel):
     stripe_event_id: str
     event_type: str
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Customer subscription billing (Stripe Checkout signup flow)
+# ---------------------------------------------------------------------------
+
+# Plan key -> (display name, monthly price in cents). Price IDs come from
+# env (STRIPE_PRICE_STARTER etc.) so no secrets live in code.
+SUBSCRIPTION_PLANS: dict[str, dict] = {
+    "starter": {"name": "Starter", "price_cents": 4900, "businesses": 1},
+    "professional": {"name": "Professional", "price_cents": 14900, "businesses": 5},
+    "enterprise": {"name": "Enterprise", "price_cents": 49900, "businesses": -1},
+}
+
+
+class CheckoutRequest(BaseModel):
+    plan: str = Field(pattern="^(starter|professional|enterprise)$")
+    email: str | None = Field(default=None, max_length=320)
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+    session_id: str
+
+
+class CompleteSignupRequest(BaseModel):
+    session_id: str = Field(min_length=1, max_length=255)
+    business_name: str = Field(min_length=1, max_length=255)
+    full_name: str = Field(min_length=1, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class CompleteSignupResponse(BaseModel):
+    token: str
+    business_id: uuid.UUID
+    business_name: str
 
 
 # ---------------------------------------------------------------------------
@@ -1110,3 +1283,23 @@ class TravelDashboardOut(BaseModel):
     recent_leads: list[TravelLeadOut]
     customer_count: int
     trip_request_count: int
+
+
+# ---------------------------------------------------------------------------
+# Audit log (admin-only read)
+# ---------------------------------------------------------------------------
+
+
+class AuditLogOut(ORMModel):
+    id: uuid.UUID
+    created_at: datetime
+    actor_type: str
+    actor_id: str | None = None
+    actor_email: str | None = None
+    business_id: uuid.UUID | None = None
+    action: str
+    resource_type: str | None = None
+    resource_id: str | None = None
+    details: dict[str, Any] = {}
+    ip_address: str | None = None
+    user_agent: str | None = None

@@ -20,9 +20,6 @@ import AffiliatesPage from "./pages/Affiliates";
 import DravenPage from "./pages/Draven";
 import SwarmPage from "./pages/Swarm";
 import TemplatesPage from "./pages/Templates";
-import MarketIntelPage from "./pages/MarketIntel";
-import AlphaPage from "./pages/Alpha";
-import SettingsPage from "./pages/Settings";
 import PipelinePage from "./pages/Pipeline";
 import MeetingsPage from "./pages/Meetings";
 import KnowledgePage from "./pages/Knowledge";
@@ -65,9 +62,8 @@ export default function App() {
             <Route path="/draven" element={<DravenPage />} />
             <Route path="/swarm" element={<SwarmPage />} />
             <Route path="/templates" element={<TemplatesPage />} />
-            <Route path="/market-intel" element={<MarketIntelPage />} />
-            <Route path="/market-intel/:id" element={<MarketIntelPage />} />
-            <Route path="/alpha" element={<AlphaPage />} />
+            <Route path="/market-intel/*" element={<Navigate to="/draven" replace />} />
+            <Route path="/alpha" element={<Navigate to="/draven" replace />} />
             <Route path="/pipeline" element={<PipelinePage />} />
             <Route path="/travel" element={<TravelDashboardPage />} />
             <Route path="/travel/leads" element={<TravelLeadsPage />} />
@@ -79,7 +75,7 @@ export default function App() {
             <Route path="/meetings" element={<MeetingsPage />} />
             <Route path="/knowledge" element={<KnowledgePage />} />
             <Route path="/integrations" element={<IntegrationsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings" element={<Navigate to="/integrations" replace />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

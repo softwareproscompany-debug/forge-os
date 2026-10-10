@@ -24,12 +24,9 @@ const NAV = [
   { to: "/interview", label: "Interview", icon: "❝" },
   { to: "/knowledge", label: "Knowledge", icon: "▤" },
   { to: "/templates", label: "Templates", icon: "▦" },
-  { to: "/market-intel", label: "Market Intel", icon: "◈" },
-  { to: "/alpha", label: "Alpha", icon: "⚡" },
   { to: "/draven", label: "Draven", icon: "⬢" },
   { to: "/swarm", label: "Swarm", icon: "✦" },
   { to: "/integrations", label: "Integrations", icon: "⎔" },
-  { to: "/settings", label: "Settings", icon: "🔑" },
 ] as const;
 
 /** AI agent groups for the sidebar: blueprint categories mapped to the

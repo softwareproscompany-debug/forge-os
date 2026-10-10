@@ -1121,7 +1121,6 @@ export interface IntegrationStatus {
   label: string;
   connected: boolean;
   detail: string | null;
-  settingsPath: string;
 }
 
 export const integrationsApi = {
@@ -1149,7 +1148,6 @@ export const integrationsApi = {
       detail: provider
         ? `${provider.provider}${provider.model ? ` · ${provider.model}` : ""}`
         : null,
-      settingsPath: "/draven",
     });
     // Voice (ElevenLabs TTS)
     out.push({
@@ -1157,7 +1155,6 @@ export const integrationsApi = {
       label: "Voice (ElevenLabs)",
       connected: provider?.tts.configured ?? false,
       detail: provider?.tts.provider === "elevenlabs" ? "ElevenLabs" : null,
-      settingsPath: "/settings",
     });
     // Vault-managed secrets (Market Intel, webhooks, etc.)
     for (const section of sections.sections) {
@@ -1168,7 +1165,6 @@ export const integrationsApi = {
           label: secret.label,
           connected: secret.configured,
           detail: null,
-          settingsPath: "/settings",
         });
       }
     }

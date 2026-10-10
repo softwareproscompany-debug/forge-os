@@ -903,9 +903,9 @@ export default function DravenPage() {
             </label>
             {!ttsConfigured && (
               <p className="dv-muted" style={{ marginTop: 6, fontSize: 12 }}>
-                Using the browser voice for now — connect ElevenLabs in{" "}
-                <Link to="/settings" className="dv-link">
-                  Settings → Voice
+                Using the browser voice for now. Review voice status in{" "}
+                <Link to="/integrations" className="dv-link">
+                  Integrations
                 </Link>{" "}
                 for the premium Draven voice. It becomes the default
                 automatically once configured.
@@ -1044,8 +1044,8 @@ export default function DravenPage() {
               )}
             </div>
             <p className="dv-muted" style={{ marginTop: 0 }}>
-              <Link to="/settings" className="dv-link">
-                Manage all keys in Settings →
+              <Link to="/integrations" className="dv-link">
+                Review integration status →
               </Link>{" "}
               Keys are stored encrypted in the central vault.
             </p>

@@ -18,7 +18,7 @@ fly postgres create --name forgeos-db --region dfw --vm-size shared-cpu-1x --vol
 ## 2. Create the apps (names must be globally unique — adjust if taken)
 
 ```bash
-fly apps create forgeos-api
+fly apps create forgeos-api-app
 fly apps create forgeos-worker
 fly apps create forgeos-web
 ```
@@ -35,13 +35,13 @@ That prints a `REDIS_URL`. (Alternatively `fly redis attach` only works for apps
 
 ```bash
 # DATABASE_URL is set automatically by attach:
-fly postgres attach --app forgeos-api forgeos-db
+fly postgres attach --app forgeos-api-app forgeos-db
 
 # Shared secrets (generate fresh values):
 JWT_SECRET=$(openssl rand -base64 32)
 WEBHOOK_SECRET=$(openssl rand -base64 32)
 
-fly secrets set --app forgeos-api \
+fly secrets set --app forgeos-api-app \
   REDIS_URL="<paste REDIS_URL>" \
   JWT_SECRET="$JWT_SECRET" \
   WEBHOOK_SECRET="$WEBHOOK_SECRET" \
@@ -84,12 +84,12 @@ kill %1
 ## 7. Open it
 
 - App: **https://forgeos-web.fly.dev**
-- API: **https://forgeos-api.fly.dev** (`/healthz` for a quick check)
+- API: **https://forgeos-api-app.fly.dev** (`/healthz` for a quick check)
 - Demo login: `demo@forgeos.local` / `demo1234` (after seeding)
 
 ## Notes
 
 - `auto_stop_machines = "stop"` lets idle machines sleep; the API keeps `min_machines_running = 1` so the first click is fast. The worker never sleeps (cron jobs need it).
-- Affiliate short links (`https://forgeos-api.fly.dev/r/{slug}`) work from anywhere — no login needed.
-- Logs: `fly logs --app forgeos-api` (or `-worker`, `-web`).
+- Affiliate short links (`https://forgeos-api-app.fly.dev/r/{slug}`) work from anywhere — no login needed.
+- Logs: `fly logs --app forgeos-api-app` (or `-worker`, `-web`).
 - If an app name is taken, rename it in the `.toml` `app =` field and in `web.toml`'s `VITE_API_URL`.

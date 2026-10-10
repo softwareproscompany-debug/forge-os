@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { integrationsApi } from "../lib/api";
 import type { IntegrationStatus } from "../lib/api";
 import {
@@ -41,24 +40,14 @@ export default function IntegrationsPage() {
     <div>
       <PageHeader
         title="Integrations"
-        subtitle="Connected services and API keys. Manage credentials in Settings."
-        actions={
-          <Link to="/settings" className="btn btn-ghost">
-            Open Settings
-          </Link>
-        }
+        subtitle="Configuration status for connected services."
       />
       {error ? <ErrorBanner error={error} /> : null}
 
       {items.length === 0 ? (
         <EmptyState
           title="No integrations found"
-          hint="Connect your first service in Settings."
-          action={
-            <Link to="/settings" className="btn btn-primary">
-              Open Settings
-            </Link>
-          }
+          hint="Integration status will appear here when services are configured."
         />
       ) : (
         <div
@@ -92,11 +81,6 @@ export default function IntegrationsPage() {
                   {it.detail}
                 </div>
               )}
-              <div style={{ marginTop: 10 }}>
-                <Link to={it.settingsPath} className="btn btn-ghost btn-sm">
-                  {it.connected ? "Manage" : "Connect"} →
-                </Link>
-              </div>
             </div>
           ))}
         </div>

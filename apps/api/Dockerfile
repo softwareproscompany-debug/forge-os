@@ -21,6 +21,12 @@ RUN pip install --no-cache-dir -r apps/api/requirements.txt \
 
 COPY apps/api/ ./apps/api/
 
+# Drop privileges: the API binds 8000 (unprivileged port) and never writes
+# to disk at runtime (PYTHONDONTWRITEBYTECODE=1, no file outputs in app/).
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /srv/forge-os
+USER appuser
+
 WORKDIR /srv/forge-os/apps/api
 EXPOSE 8000
 

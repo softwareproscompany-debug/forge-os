@@ -11,12 +11,26 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from forge_db.models import Base
 
-__all__ = ["Base", "get_engine", "SessionLocal", "get_db"]
+__all__ = ["Base", "get_engine", "SessionLocal", "get_db", "normalize_database_url"]
+
+
+def normalize_database_url(url: str) -> str:
+    """Rewrite legacy ``postgres://`` scheme to ``postgresql://``.
+
+    Fly's ``postgres attach`` (and other providers) emit ``postgres://``
+    URLs, but SQLAlchemy 2.x only recognises ``postgresql://`` —
+    anything else raises ``NoSuchModuleError: Can't load plugin:
+    sqlalchemy.dialects:postgres``.
+    """
+    if url.startswith("postgres://"):
+        return "postgresql://" + url[len("postgres://") :]
+    return url
 
 
 @lru_cache(maxsize=1)
 def get_engine(database_url: str) -> Engine:
     """Create (once per process) the SQLAlchemy engine for ``database_url``."""
+    database_url = normalize_database_url(database_url)
     connect_args: dict = {}
     if database_url.startswith("sqlite"):
         # SQLite needs check_same_thread=False for TestClient usage.

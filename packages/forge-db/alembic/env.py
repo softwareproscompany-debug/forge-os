@@ -18,14 +18,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import forge_db.models  # noqa: F401  (side effect: registers metadata)
 from forge_db.models import Base
+from forge_db.session import normalize_database_url
 
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg2://forge:forge@localhost:5432/forge"
+DATABASE_URL = normalize_database_url(
+    os.environ.get(
+        "DATABASE_URL", "postgresql+psycopg2://forge:forge@localhost:5432/forge"
+    )
 )
 
 target_metadata = Base.metadata

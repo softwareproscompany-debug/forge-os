@@ -33,14 +33,23 @@ spec:
       labels:
         app: api
     spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       initContainers:
         # Idempotent schema migration; the entrypoint script also does this in
         # compose, but in k8s an initContainer keeps rollout ordering explicit.
         # forge-db layout: alembic/alembic.ini, invoked from the package dir.
         - name: migrate
           image: forgeos/api:latest
+          imagePullPolicy: IfNotPresent
           command:
             ["sh", "-c", "cd /app/packages/forge-db && alembic -c alembic/alembic.ini upgrade head"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - configMapRef:
                 name: forgeos-config
@@ -49,8 +58,13 @@ spec:
       containers:
         - name: api
           image: forgeos/api:latest
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           envFrom:
             - configMapRef:
                 name: forgeos-config

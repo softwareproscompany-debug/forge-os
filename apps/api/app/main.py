@@ -6,12 +6,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
+from app.core.security_headers import SecurityHeadersMiddleware
+from app.core.startup_checks import run_startup_checks
 from app.routers import (
     affiliates,
     alpha,
     analytics,
     assets,
     assistant,
+    audit_log,
     auth,
     autopilot,
     billing,
@@ -36,24 +39,32 @@ from app.routers import (
     webhooks,
 )
 from app.routers import settings as settings_router
+from app.routers import affiliate_vault as affiliate_vault_router
 
 
-def create_app() -> FastAPI:
-    settings = get_settings()
+def create_app(settings=None) -> FastAPI:
+    if settings is None:
+        settings = get_settings()
 
     app = FastAPI(title="ForgeOS API", version="0.1.0")
 
-    origins = (
-        ["*"]
-        if settings.CORS_ORIGINS.strip() == "*"
-        else [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
-    )
+    # Fail-closed startup checks (H1 JWT guard, M2 CORS guard). These raise
+    # RuntimeError on weak config instead of serving insecurely.
+    origins = run_startup_checks(settings)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    # OWASP Secure Headers: CSP, HSTS (prod only), X-Frame-Options, etc.
+    # HSTS is only meaningful behind TLS; emitting it on plain-HTTP dev
+    # hosts would pin browsers to HTTPS for localhost.
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        hsts_enabled=(settings.ENV == "production"),
     )
 
     @app.get("/healthz", tags=["meta"])
@@ -74,8 +85,10 @@ def create_app() -> FastAPI:
         partners.tiers_router,
         partner_portal.router,
         billing.router,
+        billing.subscription_router,
         templates.router,
         assets.router,
+        audit_log.router,
         campaigns.router,
         autopilot.router,
         analytics.router,
@@ -90,6 +103,7 @@ def create_app() -> FastAPI:
         draven.router,
         market_intel.router,
         settings_router.router,
+        affiliate_vault_router.router,
         compliance.router,
         travel.router,
     ):

@@ -242,8 +242,7 @@ jobs:
           echo "Deploying API..."
           flyctl deploy \
             --remote-only \
-            --config deploy/fly/api.toml \
-            --dockerfile apps/api/Dockerfile . || {
+            --config deploy/fly/api.toml . || {
             echo "::error::API deployment failed"
             exit 1
           }

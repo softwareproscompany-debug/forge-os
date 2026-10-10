@@ -1,17 +1,18 @@
 # ForgeOS web frontend on Fly.io — static SPA on nginx.
 # Deploy from the repo root:
-#   fly deploy --config deploy/fly/web.toml --remote-only .
+#   fly deploy --config deploy/fly/web.toml .
+# (The Dockerfile path is read from [build] below; repo root stays the context.)
 app = "forgeos-web"
 primary_region = "dfw"
 
 [build]
-  dockerfile = "deploy/fly/Dockerfile.web"
+  dockerfile = "Dockerfile.web"
   [build.args]
     # The browser calls the API directly (CORS is open by default, see config).
     VITE_API_URL = "https://forgeos-api-app.fly.dev"
 
 [http_service]
-  internal_port = 80
+  internal_port = 8080
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true

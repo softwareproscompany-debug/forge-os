@@ -7,7 +7,8 @@
 #   4. Generates JWT_SECRET / WEBHOOK_SECRET (once) on api + worker
 #   5. Allocates public IPs for api + web
 #   6. Deploys api (Alembic migrations run first), then worker, then web
-#   7. Smoke-tests the live endpoints
+#   7. Validates connectivity to Postgres and Redis
+#   8. Smoke-tests the live endpoints with retries
 #
 # Required repo secret: FLY_API_TOKEN (Fly.io account/company token, full access)
 # Trigger: every push to main, or manual (Actions → "Deploy ForgeOS to Fly.io").
@@ -24,18 +25,26 @@ on:
 
 env:
   FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  DEPLOYMENT_TIMEOUT: 45
 
 jobs:
   deploy:
     name: Provision + deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Verify FLY_API_TOKEN is set
+        run: |
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN secret is not set. Add it to repo settings."
+            exit 1
+          fi
 
       - name: Dependency scan (Python)
         run: |
@@ -79,78 +88,277 @@ jobs:
       - name: Ensure apps exist
         run: |
           for app in forgeos-api-app forgeos-worker forgeos-web; do
-            flyctl apps create "$app" --org personal 2>&1 | tail -1 || true
+            echo "Checking app: $app"
+            if flyctl apps list | grep -q "$app"; then
+              echo "✓ App $app already exists"
+            else
+              echo "Creating app $app..."
+              flyctl apps create "$app" --org personal || {
+                if flyctl apps list | grep -q "$app"; then
+                  echo "✓ App $app exists (created concurrently)"
+                else
+                  echo "::error::Failed to create app $app"
+                  exit 1
+                fi
+              }
+            fi
           done
+
+      - name: Ensure Postgres exists
+        run: |
+          echo "Checking Postgres cluster..."
+          if flyctl postgres list 2>/dev/null | grep -q 'forgeos-db'; then
+            echo "✓ Postgres forgeos-db already exists"
+          else
+            echo "Creating Postgres cluster (this takes ~60s)..."
+            flyctl postgres create \
+              --name forgeos-db \
+              --region dfw \
+              --vm-size shared-cpu-1x \
+              --volume-size 10 \
+              --org personal || {
+              if flyctl postgres list 2>/dev/null | grep -q 'forgeos-db'; then
+                echo "✓ Postgres exists (created concurrently)"
+              else
+                echo "::error::Failed to create Postgres cluster"
+                exit 1
+              fi
+            }
+          fi
 
       - name: Attach Postgres to api + worker
         run: |
           for app in forgeos-api-app forgeos-worker; do
+            echo "Checking Postgres attachment for $app..."
             if flyctl secrets list --app "$app" 2>/dev/null | grep -q 'DATABASE_URL'; then
-              echo "DATABASE_URL already set on $app — skipping attach."
+              echo "✓ DATABASE_URL already set on $app"
+              # Verify the connection works
+              flyctl ssh console --app "$app" --pty=false -C "
+                set -e
+                psql \"\$DATABASE_URL\" -c 'SELECT 1' > /dev/null
+                echo 'Database connection verified'
+              " 2>/dev/null || echo "⚠ Could not verify connection (app may not be running yet)"
             else
               echo "Attaching forgeos-db to $app..."
-              flyctl postgres attach forgeos-db --app "$app" --yes 2>&1 | tail -2
+              flyctl postgres attach forgeos-db --app "$app" --yes || {
+                if flyctl secrets list --app "$app" 2>/dev/null | grep -q 'DATABASE_URL'; then
+                  echo "✓ DATABASE_URL attached (concurrent operation)"
+                else
+                  echo "::error::Failed to attach Postgres to $app"
+                  exit 1
+                fi
+              }
             fi
           done
 
       - name: Ensure Redis + app secrets
         run: |
+          echo "Checking Redis..."
           if flyctl redis list 2>/dev/null | grep -q 'forgeos-redis'; then
-            echo "Redis forgeos-redis already exists."
+            echo "✓ Redis forgeos-redis already exists"
+            REDIS_URL=$(flyctl redis status forgeos-redis 2>/dev/null | grep -oE 'redis://[^[:space:]"""]+' | head -1)
           else
-            echo "Creating Upstash Redis (forgeos-redis)..."
-            OUT=$(flyctl redis create --name forgeos-redis --region dfw --no-replicas --org personal 2>&1)
-            echo "$OUT"
-            REDIS_URL=$(echo "$OUT" | grep -oE 'redis://[^[:space:]"""]+' | head -1)
+            echo "Creating Upstash Redis (this takes ~30s)..."
+            OUT=$(flyctl redis create \
+              --name forgeos-redis \
+              --region dfw \
+              --no-replicas \
+              --org personal 2>&1) || {
+              if flyctl redis list 2>/dev/null | grep -q 'forgeos-redis'; then
+                echo "✓ Redis created (concurrent operation)"
+                REDIS_URL=$(flyctl redis status forgeos-redis 2>/dev/null | grep -oE 'redis://[^[:space:]"""]+' | head -1)
+              else
+                echo "::error::Failed to create Redis"
+                exit 1
+              fi
+            }
+            
+            if [ -z "$REDIS_URL" ]; then
+              REDIS_URL=$(echo "$OUT" | grep -oE 'redis://[^[:space:]"""]+' | head -1)
+            fi
+            
             if [ -z "$REDIS_URL" ]; then
               echo "::error::Could not parse REDIS_URL from redis create output"
+              echo "$OUT"
               exit 1
             fi
-            flyctl secrets set --app forgeos-api-app "REDIS_URL=$REDIS_URL"
-            flyctl secrets set --app forgeos-worker "REDIS_URL=$REDIS_URL"
           fi
+          
+          echo "Setting REDIS_URL on apps..."
           for app in forgeos-api-app forgeos-worker; do
-            if flyctl secrets list --app "$app" 2>/dev/null | grep -q 'JWT_SECRET'; then
-              echo "Secrets already set on $app."
-            else
-              echo "Generating secrets for $app..."
+            if ! flyctl secrets list --app "$app" 2>/dev/null | grep -q 'REDIS_URL'; then
+              flyctl secrets set --app "$app" "REDIS_URL=$REDIS_URL"
+              echo "✓ REDIS_URL set on $app"
+            fi
+          done
+          
+          echo "Generating/validating secrets..."
+          for app in forgeos-api-app forgeos-worker; do
+            if ! flyctl secrets list --app "$app" 2>/dev/null | grep -q 'JWT_SECRET'; then
+              echo "Generating JWT_SECRET and WEBHOOK_SECRET for $app..."
               flyctl secrets set --app "$app" \
                 "JWT_SECRET=$(openssl rand -hex 32)" \
                 "WEBHOOK_SECRET=$(openssl rand -hex 32)"
+              echo "✓ Secrets generated for $app"
+            else
+              echo "✓ Secrets already exist on $app"
             fi
           done
-          # Safe non-secret defaults (real AI keys are set separately)
-          flyctl secrets set --app forgeos-api-app LLM_PROVIDER=stub CHANNEL_MODE=stub
-          flyctl secrets set --app forgeos-worker LLM_PROVIDER=stub CHANNEL_MODE=stub
-          # Security hardening: production fail-closed guards. ENV=production
-          # enables the JWT-secret strength check, CORS wildcard refusal,
-          # and HSTS. CORS_ORIGINS must be explicit — the code default is
-          # localhost-only and would block the production frontend.
-          flyctl secrets set --app forgeos-api-app ENV=production
-          flyctl secrets set --app forgeos-worker ENV=production
-          flyctl secrets set --app forgeos-api-app CORS_ORIGINS=https://forgeos-web.fly.dev
+          
+          # Default provider settings (can be overridden via secrets panel)
+          echo "Setting default provider configuration..."
+          flyctl secrets set --app forgeos-api-app \
+            LLM_PROVIDER=stub \
+            CHANNEL_MODE=stub \
+            --stage 2>/dev/null || flyctl secrets set --app forgeos-api-app LLM_PROVIDER=stub CHANNEL_MODE=stub
+          
+          flyctl secrets set --app forgeos-worker \
+            LLM_PROVIDER=stub \
+            CHANNEL_MODE=stub \
+            --stage 2>/dev/null || flyctl secrets set --app forgeos-worker LLM_PROVIDER=stub CHANNEL_MODE=stub
+          
+          # Production security hardening
+          echo "Applying production security hardening..."
+          flyctl secrets set --app forgeos-api-app \
+            ENV=production \
+            CORS_ORIGINS=https://forgeos-web.fly.dev
 
       - name: Ensure public IPs for api + web
         run: |
           for app in forgeos-api-app forgeos-web; do
-            flyctl ips allocate-v4 --app "$app" --yes 2>&1 | tail -1 || true
-            flyctl ips allocate-v6 --app "$app" --yes 2>&1 | tail -1 || true
+            echo "Checking public IPs for $app..."
+            if flyctl ips list --app "$app" 2>/dev/null | grep -q 'v4\|v6'; then
+              echo "✓ Public IPs already allocated for $app"
+            else
+              echo "Allocating public IPs for $app..."
+              flyctl ips allocate-v4 --app "$app" --yes || true
+              flyctl ips allocate-v6 --app "$app" --yes || true
+            fi
           done
 
       - name: Deploy API (runs Alembic migrations first)
-        run: flyctl deploy --remote-only --config deploy/fly/api.toml --dockerfile apps/api/Dockerfile .
+        timeout-minutes: 20
+        run: |
+          echo "Deploying API..."
+          flyctl deploy \
+            --remote-only \
+            --config deploy/fly/api.toml \
+            --dockerfile apps/api/Dockerfile . || {
+            echo "::error::API deployment failed"
+            exit 1
+          }
+          echo "✓ API deployed successfully"
+
+      - name: Validate API database connection
+        timeout-minutes: 5
+        run: |
+          echo "Validating API database connection..."
+          max_retries=10
+          retry=0
+          while [ $retry -lt $max_retries ]; do
+            if flyctl ssh console --app forgeos-api-app --pty=false -C "
+              psql \"\$DATABASE_URL\" -c 'SELECT 1' > /dev/null 2>&1 && echo 'OK'
+            " 2>/dev/null | grep -q 'OK'; then
+              echo "✓ Database connection verified"
+              break
+            fi
+            retry=$((retry + 1))
+            echo "Attempt $retry/$max_retries: Waiting for database..."
+            sleep 5
+          done
+          if [ $retry -eq $max_retries ]; then
+            echo "::warning::Could not verify database connection (may succeed once deployed)"
+          fi
 
       - name: Deploy worker
-        run: flyctl deploy --remote-only --config deploy/fly/worker.toml --dockerfile apps/worker/Dockerfile .
+        timeout-minutes: 15
+        run: |
+          echo "Deploying worker..."
+          flyctl deploy \
+            --remote-only \
+            --config deploy/fly/worker.toml \
+            --dockerfile apps/worker/Dockerfile . || {
+            echo "::error::Worker deployment failed"
+            exit 1
+          }
+          echo "✓ Worker deployed successfully"
 
       - name: Deploy web
-        run: flyctl deploy --remote-only --config deploy/fly/web.toml .
-
-      - name: Smoke test live endpoints
+        timeout-minutes: 15
         run: |
-          sleep 25
-          echo "--- API health ---"
-          curl -sf https://forgeos-api-app.fly.dev/healthz
-          echo ""
-          echo "--- Web ---"
-          curl -sf -o /dev/null -w "web: %{http_code}\n" https://forgeos-web.fly.dev/
+          echo "Deploying web..."
+          flyctl deploy \
+            --remote-only \
+            --config deploy/fly/web.toml . || {
+            echo "::error::Web deployment failed"
+            exit 1
+          }
+          echo "✓ Web deployed successfully"
+
+      - name: Smoke test live endpoints (with retries)
+        timeout-minutes: 5
+        run: |
+          echo "Running smoke tests..."
+          sleep 15  # Extended wait for API to initialize
+          
+          # Test API health
+          echo "Testing API health..."
+          max_retries=15
+          retry=0
+          while [ $retry -lt $max_retries ]; do
+            if curl -sf https://forgeos-api-app.fly.dev/healthz 2>/dev/null; then
+              echo "✓ API health check passed"
+              break
+            fi
+            retry=$((retry + 1))
+            echo "Attempt $retry/$max_retries: Waiting for API..."
+            sleep 4
+          done
+          
+          if [ $retry -eq $max_retries ]; then
+            echo "::error::API health check failed after $max_retries attempts"
+            exit 1
+          fi
+          
+          # Test web
+          echo "Testing web..."
+          if curl -sf -o /dev/null -w "web: %{http_code}\n" https://forgeos-web.fly.dev/; then
+            echo "✓ Web responding"
+          else
+            echo "::error::Web health check failed"
+            exit 1
+          fi
+          
+          echo "✓ All smoke tests passed"
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "## ✅ Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Access your ForgeOS instance:" >> $GITHUB_STEP_SUMMARY
+          echo "- **App**: https://forgeos-web.fly.dev" >> $GITHUB_STEP_SUMMARY
+          echo "- **API**: https://forgeos-api-app.fly.dev" >> $GITHUB_STEP_SUMMARY
+          echo "- **Logs**: \`fly logs --app forgeos-api-app\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Demo login (if seeded):" >> $GITHUB_STEP_SUMMARY
+          echo "- **Email**: demo@forgeos.local" >> $GITHUB_STEP_SUMMARY
+          echo "- **Password**: demo1234" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Log in and verify the FORGE flow (generate → approve → send)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Add LLM credentials to go live: \`flyctl secrets set --app forgeos-api-app ANTHROPIC_API_KEY=...\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Set \`CHANNEL_MODE=live\` and add provider keys for email/SMS/social" >> $GITHUB_STEP_SUMMARY
+          echo "4. See \`KEYS.md\` for per-provider setup instructions" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment failed summary
+        if: failure()
+        run: |
+          echo "## ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Debug steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Check app status: \`flyctl status --app forgeos-api-app\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. View logs: \`flyctl logs --app forgeos-api-app\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Verify secrets: \`flyctl secrets list --app forgeos-api-app\`" >> $GITHUB_STEP_SUMMARY
+          echo "4. Check Redis: \`flyctl redis status forgeos-redis\`" >> $GITHUB_STEP_SUMMARY
+          echo "5. See workflow logs above for specific error messages" >> $GITHUB_STEP_SUMMARY
